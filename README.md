@@ -1,8 +1,8 @@
 # Reading Librarian
 
-A small local flat-file CLI for managing a reading backlog.
+A small, (mostly) local, flat-file CLI for managing a reading backlog.
 
-It ingests supported files from `inbox/`, proposes deterministic filenames, moves them into a flat `library/` folder only with `--apply`, and maintains one human-readable `library/index.md`.
+It ingests supported files from `inbox/`, proposes deterministic filenames, moves them into a flat `library/` folder with `--apply`, and maintains one human and agent-readable `library/index.md`.
 
 ## Install for Local Development
 
