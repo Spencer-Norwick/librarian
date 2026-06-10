@@ -198,8 +198,8 @@ class LibrarianCliTests(unittest.TestCase):
             root = Path(tmp)
             self.make_project(root)
             entries = [
-                WorkEntry(author="A, Author", title="Already Sent", filename="AAuthor_AlreadySent_2000_book.txt", sent="2026-01-01"),
-                WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never"),
+                WorkEntry(author="A, Author", title="Already Sent", filename="AAuthor_AlreadySent_2000_book.txt", sent="2026-01-01", summary="Ready."),
+                WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready."),
             ]
             (root / "library" / "index.md").write_text(render_index(entries), encoding="utf-8")
 
@@ -213,7 +213,7 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never")
+            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
             existing = root / "_output" / "weekly-read-drafts" / f"{today()}_NeverSent.md"
             existing.write_text("existing draft", encoding="utf-8")
@@ -370,6 +370,61 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].author, "Chiang, Ted")
             self.assertEqual(entries[0].title, "Stories Of Your Life")
             self.assertEqual(entries[0].year, "2002")
+
+    def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            stale = root / "library" / "BaudrillardJean_SimulacraAndSimulation_nd_book.txt"
+            stale.write_text("Simulacra and Simulation Jean Baudrillard First published 1994 Contents", encoding="utf-8")
+            legacy = root / "library" / "Cage_John_Silence_1961_essays.txt"
+            legacy.write_text("Silence John Cage 1961 Contents", encoding="utf-8")
+
+            code, output = self.run_cli(root, "maintain")
+
+            self.assertEqual(code, 0)
+            self.assertIn("BaudrillardJean_SimulacraAndSimulation_nd_book.txt -> BaudrillardJean_SimulacraAndSimulation_1994_book.txt", output)
+            self.assertNotIn("CageJohn_Silence_1961_essay.txt", output)
+            self.assertTrue(stale.exists())
+
+    def test_maintain_apply_renames_stale_file_and_rebuilds_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            stale = root / "library" / "BaudrillardJean_SimulacraAndSimulation_nd_book.txt"
+            stale.write_text("Simulacra and Simulation Jean Baudrillard First published 1994 Contents", encoding="utf-8")
+
+            code, output = self.run_cli(root, "maintain", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied maintenance: 1 rename", output)
+            repaired = root / "library" / "BaudrillardJean_SimulacraAndSimulation_1994_book.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(stale.exists())
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].filename, repaired.name)
+
+    def test_maintain_preserves_existing_year_when_local_inference_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            stale = root / "library" / "BaudrillardJean_SimulacraAndSimulation_nd_book.txt"
+            stale.write_text("Simulacra and Simulation Jean Baudrillard Contents", encoding="utf-8")
+            old = WorkEntry(
+                author="Baudrillard, Jean",
+                title="Simulacra And Simulation",
+                year="1994",
+                work_type="book",
+                filename=stale.name,
+                original_filename="original.pdf",
+                summary="Ready.",
+            )
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "maintain")
+
+            self.assertEqual(code, 0)
+            self.assertIn("BaudrillardJean_SimulacraAndSimulation_nd_book.txt -> BaudrillardJean_SimulacraAndSimulation_1994_book.txt", output)
 
     def test_reindex_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

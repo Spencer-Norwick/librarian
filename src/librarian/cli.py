@@ -4,6 +4,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -81,6 +82,18 @@ class CatalogMatch:
     author: str = ""
     year: str = ""
     note: str = ""
+
+
+@dataclass
+class RenamePlan:
+    source_name: str
+    target_name: str
+
+
+@dataclass
+class MaintenancePlan:
+    entries: list[WorkEntry]
+    renames: list[RenamePlan]
 
 
 def project_config(root: Path) -> Config:
@@ -397,7 +410,7 @@ def command_ingest(args: argparse.Namespace, root: Path) -> int:
         entries = upsert_entry(entries, entry)
         append_ingest_log(config.ingest_log, source.name, entry, target)
 
-    config.index.write_text(render_index(entries), encoding="utf-8")
+    write_index(config.index, entries)
     print(f"Applied ingest for {len(plans)} file(s).")
     return 0
 
@@ -1019,12 +1032,12 @@ def infer_tags(title: str, text: str, work_type: str) -> list[str]:
     return dedupe(tags)[:4]
 
 
-def make_filename(entry: WorkEntry, config: Config) -> str:
+def make_filename(entry: WorkEntry, config: Config, suffix: str | None = None) -> str:
     author = author_filename_key(entry.author)
     title = compact_pascal(entry.title) or "Untitled"
     year = entry.year or "nd"
     work_type = entry.work_type or "unknown"
-    ext = Path(entry.original_filename).suffix.lower()
+    ext = suffix or Path(entry.original_filename).suffix.lower()
     stem = f"{author}_{title}_{year}_{work_type}"
     if len(stem) > config.max_filename_stem_chars:
         overflow = len(stem) - config.max_filename_stem_chars
@@ -1105,6 +1118,21 @@ def write_text_without_overwrite(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def write_index(path: Path, entries: list[WorkEntry]) -> None:
+    write_text_atomic(path, render_index(entries))
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        temp.write_text(text, encoding="utf-8")
+        temp.replace(path)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 def stable_hash(path: Path) -> str:
@@ -1218,10 +1246,10 @@ def render_index(entries: list[WorkEntry]) -> str:
             works = "; ".join(sorted(tag_map[tag])[:8])
             lines.append(f"- {tag}: {works}")
     lines.extend(["", "## Needs Review", ""])
-    needs_review = [entry for entry in entries if entry.needs_review or "Needs review" in entry.summary]
+    needs_review = [entry for entry in entries if entry_needs_review(entry)]
     if needs_review:
         for entry in sorted(needs_review, key=lambda item: (item.author_key, item.display_title.lower())):
-            reasons = "; ".join(entry.needs_review) if entry.needs_review else "Summary or metadata needs review."
+            reasons = "; ".join(review_reasons(entry))
             lines.append(f"- {inline_code(entry.filename)} — {one_line(entry.display_title)} by {one_line(entry.author)}: {one_line(reasons)}")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1267,7 +1295,7 @@ def command_lint(args: argparse.Namespace, root: Path) -> int:
     entries = read_index(config.index)
     issues = lint_entries(config, entries)
     for issue in issues:
-        print(f"{issue.level}: {issue.message}")
+        print(f"{issue.severity} {issue.code}: {issue.message}")
 
     if args.apply:
         changed = False
@@ -1279,11 +1307,14 @@ def command_lint(args: argparse.Namespace, root: Path) -> int:
                 entries = upsert_entry(entries, entry)
                 changed = True
         if changed:
-            config.index.write_text(render_index(entries), encoding="utf-8")
+            write_index(config.index, entries)
             print("Applied lint repairs for missing library entries.")
+    errors = [issue for issue in issues if issue.severity == "ERROR"]
     if not issues:
         print("No lint issues found.")
-    return 1 if issues else 0
+    elif not errors:
+        print("No lint errors found.")
+    return 1 if errors else 0
 
 
 def command_reindex(args: argparse.Namespace, root: Path) -> int:
@@ -1298,10 +1329,7 @@ def command_reindex(args: argparse.Namespace, root: Path) -> int:
         entry.filename = path.name
         old = existing_entries.get(path.name)
         if old:
-            entry.original_filename = old.original_filename or entry.original_filename
-            entry.status = old.status
-            entry.sent = old.sent
-            entry.added = old.added
+            preserve_existing_state(entry, old)
         rebuilt.append(entry)
 
     print(f"[dry-run] Reindex {len(rebuilt)} library file(s).")
@@ -1313,15 +1341,93 @@ def command_reindex(args: argparse.Namespace, root: Path) -> int:
         print("Dry run only. Re-run with --apply to rebuild index.md metadata.")
         return 0
 
-    config.index.write_text(render_index(rebuilt), encoding="utf-8")
+    write_index(config.index, rebuilt)
     print(f"Rebuilt index.md for {len(rebuilt)} library file(s).")
     return 0
 
 
+def command_maintain(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    use_catalog_lookup = args.lookup or config.use_catalog_lookup
+    plan = build_maintenance_plan(config, use_catalog_lookup=use_catalog_lookup)
+
+    print(f"[dry-run] Maintain {len(plan.entries)} library file(s).")
+    if plan.renames:
+        for rename in plan.renames:
+            print(f"[dry-run] RENAME: {rename.source_name} -> {rename.target_name}")
+    else:
+        print("[dry-run] No filename repairs proposed.")
+
+    review_entries = [entry for entry in plan.entries if entry_needs_review(entry)]
+    if review_entries:
+        for entry in sorted(review_entries, key=lambda item: (item.author_key, item.display_title.lower())):
+            reasons = "; ".join(review_reasons(entry))
+            print(f"[dry-run] REVIEW: {entry.filename} — {entry.author} — {entry.display_title}: {reasons}")
+
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to rename files and rebuild index.md.")
+        return 0
+
+    for rename in plan.renames:
+        move_without_overwrite(config.library / rename.source_name, config.library / rename.target_name)
+    write_index(config.index, plan.entries)
+    print(f"Applied maintenance: {len(plan.renames)} rename(s), {len(plan.entries)} indexed file(s).")
+    return 0
+
+
+def build_maintenance_plan(config: Config, use_catalog_lookup: bool = False) -> MaintenancePlan:
+    existing_entries = {entry.filename: entry for entry in read_index(config.index)}
+    library_files = library_reading_files(config)
+    reserved = {path.name for path in library_files}
+    rebuilt: list[WorkEntry] = []
+    renames: list[RenamePlan] = []
+
+    for path in library_files:
+        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup)
+        old = existing_entries.get(path.name)
+        if old:
+            preserve_existing_state(entry, old)
+
+        desired_name = make_filename(entry, config, path.suffix.lower())
+        if should_repair_filename(path.name, entry, desired_name):
+            target_name = unique_filename(config.library, desired_name, path, reserved - {path.name})
+            if target_name != path.name:
+                renames.append(RenamePlan(path.name, target_name))
+                entry.filename = target_name
+                reserved.discard(path.name)
+                reserved.add(target_name)
+            else:
+                entry.filename = path.name
+        else:
+            entry.filename = path.name
+        rebuilt.append(entry)
+
+    return MaintenancePlan(rebuilt, renames)
+
+
+def should_repair_filename(current_name: str, entry: WorkEntry, desired_name: str) -> bool:
+    if current_name == desired_name:
+        return False
+    if not filename_convention_ok(current_name):
+        return True
+    return "_nd_" in current_name and entry.year != "nd"
+
+
+def preserve_existing_state(entry: WorkEntry, old: WorkEntry) -> None:
+    entry.original_filename = old.original_filename or entry.original_filename
+    entry.status = old.status
+    entry.sent = old.sent
+    entry.added = old.added
+    if entry.year == "nd" and old.year != "nd":
+        entry.year = old.year
+
+
 @dataclass
 class LintIssue:
-    level: str
+    code: str
     message: str
+    severity: str = "ERROR"
 
 
 def lint_entries(config: Config, entries: list[WorkEntry]) -> list[LintIssue]:
@@ -1337,6 +1443,15 @@ def lint_entries(config: Config, entries: list[WorkEntry]) -> list[LintIssue]:
     for filename in sorted(library_files):
         if not filename_convention_ok(filename):
             issues.append(LintIssue("BAD_FILENAME", f"`{filename}` does not match the filename convention."))
+        entry = next((item for item in entries if item.filename == filename), None)
+        if entry and "_nd_" in filename and entry.year != "nd":
+            issues.append(
+                LintIssue(
+                    "STALE_FILENAME",
+                    f"`{filename}` still contains `_nd_` but index year is {entry.year}; run `librarian maintain --apply`.",
+                    "WARN",
+                )
+            )
 
     seen_titles: dict[tuple[str, str], str] = {}
     author_keys: dict[str, str] = {}
@@ -1405,10 +1520,12 @@ def command_weekly_pick(args: argparse.Namespace, root: Path) -> int:
     candidates = [
         entry
         for entry in entries
-        if entry.status not in {"read", "skipped"} and (args.allow_repeats or entry.sent == "never")
+        if entry.status not in {"read", "skipped"}
+        and not entry_needs_review(entry)
+        and (args.allow_repeats or entry.sent == "never")
     ]
     if not candidates and args.allow_repeats:
-        candidates = [entry for entry in entries if entry.status not in {"read", "skipped"}]
+        candidates = [entry for entry in entries if entry.status not in {"read", "skipped"} and not entry_needs_review(entry)]
     if not candidates:
         print("No eligible unread works found.")
         return 1
@@ -1427,7 +1544,7 @@ def command_weekly_pick(args: argparse.Namespace, root: Path) -> int:
     write_text_without_overwrite(draft_path, draft)
     pick.sent = today()
     entries = upsert_entry(entries, pick)
-    config.index.write_text(render_index(entries), encoding="utf-8")
+    write_index(config.index, entries)
     append_sent_log(config.sent_log, pick, draft_path)
     print(f"Wrote {draft_path.relative_to(root)}.")
     return 0
@@ -1501,7 +1618,7 @@ def command_mark(args: argparse.Namespace, root: Path, status: str) -> int:
         print("Dry run only. Re-run with --apply to update index.md.")
         return 0
     entry.status = status
-    config.index.write_text(render_index(entries), encoding="utf-8")
+    write_index(config.index, entries)
     print(f"Updated {entry.display_title} to {status}.")
     return 0
 
@@ -1513,6 +1630,24 @@ def match_entries(entries: list[WorkEntry], query: str) -> list[WorkEntry]:
         for entry in entries
         if needle in entry.title.lower() or needle in entry.filename.lower() or needle in entry.author.lower()
     ]
+
+
+def entry_needs_review(entry: WorkEntry) -> bool:
+    return bool(review_reasons(entry))
+
+
+def review_reasons(entry: WorkEntry) -> list[str]:
+    reasons = list(entry.needs_review)
+    summary = entry.summary.lower()
+    if "needs review" in summary:
+        reasons.append("Summary or metadata needs review.")
+    if "no extractable text" in summary or "ocr is needed" in summary:
+        reasons.append("No extractable text found; may need OCR.")
+    if entry.author == "Unknown" or "," not in entry.author:
+        reasons.append("Author could not be fully inferred.")
+    if entry.title == "Untitled":
+        reasons.append("Title could not be inferred.")
+    return dedupe(reasons)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1530,7 +1665,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     reindex = sub.add_parser("reindex")
     reindex.add_argument("--apply", action="store_true")
-    reindex.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for missing years.")
+    reindex.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
+
+    maintain = sub.add_parser("maintain")
+    maintain.add_argument("--apply", action="store_true")
+    maintain.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
 
     weekly = sub.add_parser("weekly-pick")
     weekly.add_argument("--apply", action="store_true")
@@ -1564,6 +1703,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_lint(args, root)
         if args.command == "reindex":
             return command_reindex(args, root)
+        if args.command == "maintain":
+            return command_maintain(args, root)
         if args.command == "weekly-pick":
             return command_weekly_pick(args, root)
         if args.command == "list":
