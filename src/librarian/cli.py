@@ -412,8 +412,14 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
     guessed = infer_from_name(path.stem)
     surname_hint = guessed.get("surname_hint") or path.stem.split("_", 1)[0]
     text_author = infer_author_from_text(text, surname_hint)
+    text_identity = infer_identity_from_front_matter(text)
+    if not text_author:
+        text_author = text_identity.get("author", "")
+    guessed_title = guessed.get("title") or path.stem
+    if should_use_text_title(guessed_title, guessed.get("author", ""), text_identity.get("title", "")):
+        guessed_title = text_identity["title"]
     title_source = metadata.get("title") if useful_pdf_title(metadata.get("title", "")) else ""
-    title = clean_title(title_source or guessed.get("title") or path.stem)
+    title = clean_title(title_source or guessed_title)
     author = choose_author(guessed.get("author", ""), metadata.get("author", ""), text_author)
     title = remove_author_prefix_from_title(title, author)
     year = first_known_year(metadata.get("year", ""), guessed.get("year", ""), infer_year_from_text(text))
@@ -423,7 +429,9 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
         if lookup_note:
             review.append(lookup_note)
     year = year or "nd"
-    work_type = clean_work_type(guessed.get("work_type") or infer_work_type(path, text))
+    guessed_work_type = clean_work_type(guessed.get("work_type", ""))
+    work_type = guessed_work_type if guessed_work_type != "unknown" else infer_work_type(path, text)
+    work_type = clean_work_type(work_type)
 
     if author == "Unknown":
         review.append("Author could not be inferred.")
@@ -640,6 +648,89 @@ def infer_author_from_text(text: str, surname_hint: str) -> str:
             if candidate:
                 return candidate
     return ""
+
+
+def infer_identity_from_front_matter(text: str) -> dict[str, str]:
+    lines = front_matter_lines(text)
+    for index, line in enumerate(lines[:25]):
+        if not probable_person_name_line(line):
+            continue
+        title = front_matter_title_before(lines, index)
+        author = normalize_author_candidate(line)
+        if title and author:
+            return {"title": title, "author": author}
+    return {}
+
+
+def front_matter_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in text.splitlines()[:80]:
+        line = clean_title(raw_line)
+        if not line:
+            continue
+        if front_matter_noise_line(line):
+            continue
+        lines.append(line)
+    return lines
+
+
+def front_matter_noise_line(line: str) -> bool:
+    lower = line.lower()
+    if len(line) <= 1:
+        return True
+    return any(
+        marker in lower
+        for marker in [
+            "library of congress",
+            "cataloging in publication",
+            "isbn",
+            "all rights reserved",
+            "printed in",
+            "copyright",
+            "©",
+        ]
+    )
+
+
+def probable_person_name_line(line: str) -> bool:
+    words = re.findall(r"[A-Za-z'.]+", line)
+    if not 2 <= len(words) <= 4:
+        return False
+    if line != line.upper():
+        return False
+    lower = line.lower()
+    blocked = {"contents", "preface", "chapter", "press", "university", "library", "inc", "hall"}
+    return not any(word.lower().strip(".'") in blocked for word in words) and " and " not in lower
+
+
+def front_matter_title_before(lines: list[str], author_index: int) -> str:
+    title_lines: list[str] = []
+    for line in reversed(lines[max(0, author_index - 4) : author_index]):
+        if not front_matter_title_line(line):
+            break
+        title_lines.insert(0, line)
+    return clean_title(" ".join(title_lines))
+
+
+def front_matter_title_line(line: str) -> bool:
+    words = re.findall(r"[A-Za-z0-9]+", line)
+    if not words or len(words) > 12:
+        return False
+    lower = line.lower()
+    blocked = ["publisher", "university", "press", "series", "contents", "preface"]
+    return not any(marker in lower for marker in blocked)
+
+
+def should_use_text_title(guessed_title: str, guessed_author: str, text_title: str) -> bool:
+    if not text_title:
+        return False
+    title_key = normalize_lookup_text(guessed_title)
+    compact_key = title_key.replace(" ", "")
+    if title_key in {"untitled", "unknown"}:
+        return True
+    if re.fullmatch(r"[a-f0-9]{16,}", compact_key):
+        return True
+    return clean_author(guessed_author or "Unknown") == "Unknown" and title_key.startswith("unknown ")
 
 
 def choose_author(guessed_author: str, metadata_author: str, text_author: str) -> str:

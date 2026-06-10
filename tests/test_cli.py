@@ -155,6 +155,37 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].year, "1958")
             self.assertTrue((root / "library" / "Unknown_OppressionAndLiberty_1958_book.txt").exists())
 
+    def test_ingest_infers_title_page_identity_for_opaque_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "224fecab4a6e9d1d7b402478e5361c80.txt"
+            source.write_text(
+                "\n".join(
+                    [
+                        "Attention",
+                        "and Effort",
+                        "DANIEL KAHNEMAN",
+                        "The Hebrew University of Jerusalem",
+                        "Copyright 1973 by Prentice-Hall",
+                        "Contents",
+                        "1 Basic issues in the study of attention",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            code, _ = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 0)
+            target = root / "library" / "KahnemanDaniel_AttentionAndEffort_1973_book.txt"
+            self.assertTrue(target.exists())
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].author, "Kahneman, Daniel")
+            self.assertEqual(entries[0].title, "Attention and Effort")
+            self.assertEqual(entries[0].year, "1973")
+            self.assertEqual(entries[0].original_filename, source.name)
+
     def test_year_inference_prefers_first_published_over_later_edition(self) -> None:
         text = "This paperback edition published by Verso 2014 First published in English by Verso 2002 © Verso 2002, 2014"
 
@@ -283,6 +314,34 @@ class LibrarianCliTests(unittest.TestCase):
             entries = read_index(root / "library" / "index.md")
             self.assertEqual(entries[0].author, "Baudrillard, Jean")
             self.assertEqual(entries[0].year, "1994")
+
+    def test_reindex_repairs_opaque_unknown_filename_from_front_matter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            target = root / "library" / "Unknown_224fecab4a6e9d1d7b402478e5361c80_nd_unknown.txt"
+            target.write_text(
+                "\n".join(
+                    [
+                        "Attention",
+                        "and Effort",
+                        "DANIEL KAHNEMAN",
+                        "Copyright 1973 by Prentice-Hall",
+                        "Contents",
+                        "1 Basic issues in the study of attention",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            code, _ = self.run_cli(root, "reindex", "--apply")
+
+            self.assertEqual(code, 0)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].author, "Kahneman, Daniel")
+            self.assertEqual(entries[0].title, "Attention and Effort")
+            self.assertEqual(entries[0].year, "1973")
+            self.assertEqual(entries[0].work_type, "book")
 
     def test_reindex_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
