@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from librarian.cli import WorkEntry, filename_convention_ok, infer_year_from_text, main, read_index, render_index, today
 
@@ -342,6 +344,32 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].title, "Attention and Effort")
             self.assertEqual(entries[0].year, "1973")
             self.assertEqual(entries[0].work_type, "book")
+
+    def test_reindex_lookup_completes_surname_only_author(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            target = root / "library" / "Chiang_StoriesOfYourLife_2002_stories.txt"
+            target.write_text("", encoding="utf-8")
+            payload = {
+                "docs": [
+                    {
+                        "title": "Stories of Your Life",
+                        "author_name": ["Ted Chiang"],
+                        "first_publish_year": 2002,
+                    }
+                ]
+            }
+
+            with patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = io.BytesIO(json.dumps(payload).encode("utf-8"))
+                code, _ = self.run_cli(root, "reindex", "--lookup", "--apply")
+
+            self.assertEqual(code, 0)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].author, "Chiang, Ted")
+            self.assertEqual(entries[0].title, "Stories Of Your Life")
+            self.assertEqual(entries[0].year, "2002")
 
     def test_reindex_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

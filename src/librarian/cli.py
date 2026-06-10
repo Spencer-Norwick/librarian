@@ -75,6 +75,14 @@ class WorkEntry:
         return self.title or "Untitled"
 
 
+@dataclass
+class CatalogMatch:
+    title: str = ""
+    author: str = ""
+    year: str = ""
+    note: str = ""
+
+
 def project_config(root: Path) -> Config:
     config_path = root / "_state" / "config.toml"
     raw: dict = {}
@@ -423,11 +431,14 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
     author = choose_author(guessed.get("author", ""), metadata.get("author", ""), text_author)
     title = remove_author_prefix_from_title(title, author)
     year = first_known_year(metadata.get("year", ""), guessed.get("year", ""), infer_year_from_text(text))
-    if not year and use_catalog_lookup:
-        lookup_year, lookup_note = lookup_catalog_year(title, author, config)
-        year = lookup_year
-        if lookup_note:
-            review.append(lookup_note)
+    if use_catalog_lookup and should_lookup_catalog(title, author, year):
+        catalog = lookup_catalog_metadata(title, author, config)
+        if catalog.author and author_needs_catalog_author(author, catalog.author):
+            author = catalog.author
+        if not year and catalog.year:
+            year = catalog.year
+        if catalog.note:
+            review.append(catalog.note)
     year = year or "nd"
     guessed_work_type = clean_work_type(guessed.get("work_type", ""))
     work_type = guessed_work_type if guessed_work_type != "unknown" else infer_work_type(path, text)
@@ -857,13 +868,28 @@ def infer_year_from_text(text: str) -> str:
     return ""
 
 
-def lookup_catalog_year(title: str, author: str, config: Config) -> tuple[str, str]:
-    if not title or title == "Untitled" or not author or author == "Unknown":
-        return "", ""
+def should_lookup_catalog(title: str, author: str, year: str) -> bool:
+    if not title or title == "Untitled":
+        return False
+    return not year or author_needs_catalog_author(author, "")
+
+
+def author_needs_catalog_author(author: str, catalog_author: str) -> bool:
+    cleaned = clean_author(author or "Unknown")
+    if cleaned == "Unknown":
+        return bool(catalog_author)
+    if "," in cleaned:
+        return False
+    if not catalog_author:
+        return True
+    return same_author_last_name(cleaned, catalog_author)
+
+
+def lookup_catalog_metadata(title: str, author: str, config: Config) -> CatalogMatch:
     query = urllib.parse.urlencode(
         {
             "title": title,
-            "author": author.replace(",", ""),
+            "author": "" if author == "Unknown" else author.replace(",", ""),
             "fields": "title,author_name,first_publish_year",
             "limit": "5",
         }
@@ -876,22 +902,29 @@ def lookup_catalog_year(title: str, author: str, config: Config) -> tuple[str, s
         with urllib.request.urlopen(request, timeout=config.catalog_timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
-        return "", f"Catalog lookup failed: {exc}"
+        return CatalogMatch(note=f"Catalog lookup failed: {exc}")
 
     docs = payload.get("docs", [])
     title_key = normalize_lookup_text(title)
     author_last = author.split(",", 1)[0].strip().lower()
     for doc in docs:
-        year = str(doc.get("first_publish_year") or "")
-        if clean_year(year) == "nd":
-            continue
         doc_title = normalize_lookup_text(str(doc.get("title") or ""))
-        doc_authors = [str(name).lower() for name in doc.get("author_name") or []]
+        doc_author_names = [str(name) for name in doc.get("author_name") or []]
+        doc_authors = [name.lower() for name in doc_author_names]
         title_matches = doc_title == title_key or title_key in doc_title or doc_title in title_key
-        author_matches = not author_last or any(author_last in name for name in doc_authors)
+        author_matches = author in {"", "Unknown"} or not author_last or any(author_last in name for name in doc_authors)
         if title_matches and author_matches:
-            return clean_year(year), ""
-    return "", ""
+            return CatalogMatch(
+                title=str(doc.get("title") or ""),
+                author=clean_author(doc_author_names[0]) if doc_author_names else "",
+                year="" if clean_year(str(doc.get("first_publish_year") or "")) == "nd" else clean_year(str(doc.get("first_publish_year") or "")),
+            )
+    return CatalogMatch()
+
+
+def lookup_catalog_year(title: str, author: str, config: Config) -> tuple[str, str]:
+    match = lookup_catalog_metadata(title, author, config)
+    return match.year, match.note
 
 
 def normalize_lookup_text(value: str) -> str:
@@ -960,6 +993,8 @@ def clean_work_type(value: str) -> str:
 
 def summarize_text(title: str, text: str, review: list[str]) -> str:
     if review and not text.strip():
+        if any("No extractable" in item for item in review):
+            return "No extractable text found; OCR is needed before a reliable summary can be written."
         return "Needs metadata or text review before a reliable summary can be written."
     first_sentence = re.split(r"(?<=[.!?])\s+", text.strip())[0] if text.strip() else ""
     if first_sentence:
