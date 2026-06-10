@@ -1,0 +1,147 @@
+# Reading Librarian
+
+A small local flat-file CLI for managing a reading backlog.
+
+It ingests supported files from `inbox/`, proposes deterministic filenames, moves them into a flat `library/` folder only with `--apply`, and maintains one human-readable `library/index.md`.
+
+## Install for Local Development
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+```
+
+The MVP has no required runtime dependencies. Install `pypdf` only if you want local PDF metadata/text extraction:
+
+```bash
+python -m pip install -e '.[pdf]'
+```
+
+You can also run without installing:
+
+```bash
+PYTHONPATH=src python3 -m librarian --help
+```
+
+## Project Layout
+
+Runtime folders:
+
+- `inbox/`: files waiting to be ingested
+- `library/`: flat library files plus `index.md`
+- `_state/`: config and Markdown logs
+- `_quarantine/`: files needing manual review
+- `_output/weekly-read-drafts/`: generated weekly draft files
+
+Test/sample files live under `tests/fixtures/`. Do not put test inboxes or test libraries at the project root.
+
+## Commands
+
+```bash
+librarian init
+librarian ingest
+librarian ingest --lookup
+librarian ingest --apply
+librarian lint
+librarian lint --apply
+librarian reindex
+librarian reindex --lookup
+librarian reindex --apply
+librarian weekly-pick
+librarian weekly-pick --apply
+librarian list
+librarian search "query"
+librarian mark-read "Title or filename" --apply
+librarian skip "Title or filename" --apply
+```
+
+Commands that modify files or Markdown are dry-run by default. Use `--apply` to write changes.
+
+`lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
+
+`reindex --apply` rebuilds `index.md` metadata for files already in `library/` while preserving each entry's status, sent date, and original filename when possible.
+
+`ingest --lookup` and `reindex --lookup` use Open Library as an optional catalog fallback for missing publication years. Local PDF/text extraction is tried first, and lookup is off by default.
+
+## Filename Convention
+
+```text
+LastFirst_Title_Subtitle_Year_WorkType.ext
+```
+
+Examples:
+
+```text
+DebordGuy_SocietyOfTheSpectacle_1967_book.pdf
+Unknown_NotesOnCybernetics_nd_article.pdf
+```
+
+Collisions never overwrite existing files. A short stable hash suffix is appended when needed.
+
+Ingest also reserves planned filenames before applying a batch, so two inbox files that resolve to the same target name are both kept.
+
+## Safety
+
+- New library files and weekly drafts are created with no-overwrite file operations.
+- Supported files in `inbox/` are moved only by `ingest --apply`.
+- After `librarian init`, `index.md`, ingest logs, sent logs, and weekly draft state are edited only by commands run with `--apply`.
+- Configured paths are kept inside the project root.
+- Symlinked inbox files are ignored.
+- No SQL, database, wiki, model call, or email sending is used in the MVP.
+- Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
+
+## Scheduling Examples
+
+The CLI does not install scheduled jobs automatically.
+
+### cron
+
+```cron
+0 8 * * * cd /path/to/reading-librarian && librarian ingest --apply
+0 9 * * 1 cd /path/to/reading-librarian && librarian lint
+0 10 * * 1 cd /path/to/reading-librarian && librarian weekly-pick --apply
+```
+
+### macOS launchd
+
+Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.reading-librarian.ingest</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/venv/bin/librarian</string>
+    <string>ingest</string>
+    <string>--apply</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/path/to/reading-librarian</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+</dict>
+</plist>
+```
+
+Load it manually when ready:
+
+```bash
+launchctl load ~/Library/LaunchAgents/local.reading-librarian.ingest.plist
+```
+
+## Notes
+
+- No SQL or database is used.
+- No wiki or author-folder structure is created.
+- No real email is sent.
+- Scanned or unreadable PDFs are marked for review instead of silently passing.

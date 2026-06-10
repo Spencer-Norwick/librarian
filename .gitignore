@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+build/
+dist/
+*.egg-info/
+src/*.egg-info/
+
+# Local runtime data. Keep this project publishable by default.
+inbox/*
+library/*
+_quarantine/*
+_output/*
+_state/*
+
+# Fixture directories are tracked, but real reading files are not.
+!tests/fixtures/inbox/.gitkeep
+!tests/fixtures/library/.gitkeep
+tests/fixtures/**/*.pdf
+tests/fixtures/**/.DS_Store
