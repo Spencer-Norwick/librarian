@@ -430,6 +430,9 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("NOTIFY: Read of the Week: Never Sent", output)
+            self.assertIn("Digest pick: Never Sent by B, Author", output)
+            self.assertNotIn("[dry-run] Digest pick", output)
+            self.assertNotIn("[dry-run] Draft path", output)
             self.assertIn("Wrote _output/weekly-read-drafts", output)
             entries = read_index(root / "library" / "index.md")
             self.assertEqual(entries[0].sent, today())

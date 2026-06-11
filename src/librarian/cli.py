@@ -2054,8 +2054,9 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
         print("No digest-ready unread works found. Run `librarian enrich --apply` or ingest new files with `librarian ingest --enrich --apply`.")
         return 1
 
-    print(f"[dry-run] Digest pick: {plan.entry.display_title} by {plan.entry.author}")
-    print(f"[dry-run] Draft path: {plan.draft_path.relative_to(root)}")
+    prefix = "[dry-run] " if not args.apply else ""
+    print(f"{prefix}Digest pick: {plan.entry.display_title} by {plan.entry.author}")
+    print(f"{prefix}Draft path: {plan.draft_path.relative_to(root)}")
     if args.notify:
         print(render_digest_notification(plan.entry, plan.draft_path, plan.history))
     if not args.apply:
