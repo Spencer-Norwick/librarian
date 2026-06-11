@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tomllib
 import urllib.parse
@@ -49,6 +51,9 @@ class Config:
     max_filename_stem_chars: int = 96
     use_catalog_lookup: bool = False
     catalog_timeout_seconds: float = 5.0
+    use_model_assistance: bool = False
+    model_command: list[str] = field(default_factory=list)
+    model_max_input_chars: int = 12000
 
 
 @dataclass
@@ -63,6 +68,7 @@ class WorkEntry:
     sent: str = "never"
     reading_time: str = "~0m"
     summary: str = "Needs review."
+    primer_prompts: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=lambda: list(DEFAULT_TAGS))
     related: str = "None."
     needs_review: list[str] = field(default_factory=list)
@@ -113,6 +119,14 @@ class DigestHistory:
     skip_count: int = 0
 
 
+@dataclass
+class ModelEnrichment:
+    summary: str = ""
+    primer_prompts: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    related: str = ""
+
+
 def project_config(root: Path) -> Config:
     config_path = root / "_state" / "config.toml"
     raw: dict = {}
@@ -143,6 +157,9 @@ def project_config(root: Path) -> Config:
         max_filename_stem_chars=int(behavior.get("max_filename_stem_chars", 96)),
         use_catalog_lookup=bool(behavior.get("use_catalog_lookup", False)),
         catalog_timeout_seconds=float(behavior.get("catalog_timeout_seconds", 5.0)),
+        use_model_assistance=bool(behavior.get("use_model_assistance", False)),
+        model_command=model_command(behavior.get("model_command", [])),
+        model_max_input_chars=int(behavior.get("model_max_input_chars", 12000)),
     )
 
 
@@ -157,6 +174,17 @@ def safe_project_path(root: Path, value: str) -> Path:
     if candidate != root and root not in candidate.parents:
         raise ValueError(f"Configured path escapes project root: {value}")
     return candidate
+
+
+def model_command(value: object) -> list[str]:
+    env_value = os.environ.get("LIBRARIAN_MODEL_COMMAND", "")
+    if env_value:
+        return shlex.split(env_value)
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return shlex.split(value)
+    return []
 
 
 def init_project(root: Path) -> int:
@@ -197,6 +225,8 @@ supported_extensions = [".pdf", ".epub", ".txt", ".md", ".docx"]
 reading_words_per_minute = 250
 max_filename_stem_chars = 96
 use_model_assistance = false
+model_command = []
+model_max_input_chars = 12000
 use_catalog_lookup = false
 catalog_timeout_seconds = 5
 """
@@ -279,15 +309,20 @@ Test/sample files live under `tests/fixtures/`. Do not put test inboxes or test 
 librarian init
 librarian ingest
 librarian ingest --lookup
+librarian ingest --enrich --apply
 librarian ingest --apply
 librarian lint
 librarian lint --apply
 librarian reindex
 librarian reindex --lookup
+librarian reindex --enrich --apply
 librarian reindex --apply
 librarian maintain
 librarian maintain --lookup
+librarian maintain --enrich --apply
 librarian maintain --apply
+librarian enrich
+librarian enrich "Title or filename" --apply
 librarian digest
 librarian digest --notify
 librarian digest --email --apply
@@ -305,11 +340,13 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 `ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
 
+`ingest --enrich`, `reindex --enrich`, `maintain --enrich`, and `enrich` use a configured `model_command` to turn extracted text into a real summary, work-specific primer prompts, tags, and related-reading notes. Model enrichment is off by default.
+
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
 
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
-Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path.
+Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
 
 ## Metadata Pipeline
 
@@ -329,6 +366,34 @@ Each index entry includes `Next action` so humans and agents know what to do nex
 - `needs_ocr`: metadata is usable, but content extraction needs OCR.
 - `needs_manual`: automated repair was not confident enough.
 - `needs_model`: text and metadata are available; a model could improve summaries, tags, or prompts.
+
+## Model Enrichment Contract
+
+Configure a model command in `_state/config.toml` or with `LIBRARIAN_MODEL_COMMAND`.
+
+```toml
+[behavior]
+use_model_assistance = false
+model_command = ["path/to/enrich-command"]
+model_max_input_chars = 12000
+```
+
+The command receives JSON on stdin with the work metadata, instructions, and a text excerpt. It must print JSON on stdout:
+
+```json
+{
+  "summary": "One to three specific sentences about the work.",
+  "primer_prompts": [
+    "A work-specific question for entering the text.",
+    "A second work-specific question.",
+    "A third work-specific question."
+  ],
+  "tags": ["philosophy", "media"],
+  "related": "Optional concise related-reading note."
+}
+```
+
+The CLI rejects incomplete enrichment output. A usable enrichment needs a specific summary and at least two primer prompts.
 
 ## Filename Convention
 
@@ -354,7 +419,8 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 - After `librarian init`, `index.md`, ingest logs, sent/status logs, and weekly draft state are edited only by commands run with `--apply`.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
-- No SQL, database, wiki, or model call is used in the MVP.
+- No SQL, database, or wiki is used.
+- Model calls happen only when `--enrich`, `librarian enrich`, or `use_model_assistance = true` is configured.
 - Email is sent only when explicitly requested with `digest --email --apply` and configured through environment variables.
 - Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
 
@@ -436,6 +502,10 @@ def supported_files(config: Config, folder: Path) -> list[Path]:
 def command_ingest(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
+    use_model_enrichment = args.enrich or config.use_model_assistance
+    if use_model_enrichment and not config.model_command:
+        print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
+        return 2
     entries = read_index(config.index)
     existing_files = {entry.filename for entry in entries}
     reserved_names = {path.name for path in config.library.iterdir() if path.is_file()} if config.library.exists() else set()
@@ -443,7 +513,7 @@ def command_ingest(args: argparse.Namespace, root: Path) -> int:
     use_catalog_lookup = args.lookup or config.use_catalog_lookup
 
     for source in supported_files(config, config.inbox):
-        entry = infer_entry(source, config, use_catalog_lookup=use_catalog_lookup)
+        entry = infer_entry(source, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=use_model_enrichment)
         target_name = unique_filename(config.library, make_filename(entry, config), source, reserved_names)
         reserved_names.add(target_name)
         entry.filename = target_name
@@ -476,7 +546,7 @@ def command_ingest(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
-def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) -> WorkEntry:
+def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, use_model_enrichment: bool = False) -> WorkEntry:
     text = ""
     metadata: dict[str, str] = {}
     review: list[str] = []
@@ -531,6 +601,7 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
     reading_minutes = max(1, round(word_count / config.reading_words_per_minute)) if word_count else 0
     summary = summarize_text(title, text, review)
     tags = infer_tags(title, text, work_type)
+    primer_prompts: list[str] = []
     next_action = classify_next_action(
         author=author,
         title=title,
@@ -539,6 +610,27 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
         review=review,
         summary=summary,
     )
+    if use_model_enrichment and next_action == "needs_model":
+        enrichment = enrich_from_model(
+            config=config,
+            entry=WorkEntry(author=author, title=title, year=year, work_type=work_type, original_filename=path.name),
+            text=text,
+        )
+        if enrichment:
+            summary = enrichment.summary
+            primer_prompts = enrichment.primer_prompts
+            if enrichment.tags:
+                tags = dedupe(tags + enrichment.tags)[:6]
+            if enrichment.related:
+                related = enrichment.related
+            else:
+                related = "None."
+            next_action = "clean"
+        else:
+            review.append("Model enrichment failed or returned incomplete output.")
+            related = "None."
+    else:
+        related = "None."
 
     return WorkEntry(
         author=author,
@@ -549,8 +641,9 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
         original_filename=path.name,
         reading_time=f"~{reading_minutes}m",
         summary=summary,
+        primer_prompts=primer_prompts,
         tags=tags,
-        related="None.",
+        related=related,
         needs_review=dedupe(review),
         next_action=next_action,
         added=today(),
@@ -1125,6 +1218,81 @@ def infer_tags(title: str, text: str, work_type: str) -> list[str]:
     return dedupe(tags)[:4]
 
 
+def enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelEnrichment | None:
+    if not config.model_command or not text.strip():
+        return None
+    payload = {
+        "task": "enrich_reading_index_entry",
+        "instructions": [
+            "Return only JSON.",
+            "Write a concise, specific summary of the work in 1-3 sentences.",
+            "Write 3 work-specific primer_prompts that help a reader enter the work.",
+            "Use short lowercase tags when useful.",
+            "Do not invent bibliographic facts not supported by the metadata or text excerpt.",
+        ],
+        "work": {
+            "title": entry.display_title,
+            "author": entry.author,
+            "year": entry.year,
+            "work_type": entry.work_type,
+            "filename": entry.filename,
+            "original_filename": entry.original_filename,
+        },
+        "text_excerpt": text[: config.model_max_input_chars],
+        "expected_schema": {
+            "summary": "string",
+            "primer_prompts": ["string", "string", "string"],
+            "tags": ["string"],
+            "related": "string",
+        },
+    }
+    try:
+        completed = subprocess.run(
+            config.model_command,
+            input=json.dumps(payload, ensure_ascii=True),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+    except OSError:
+        return None
+    except subprocess.TimeoutExpired:
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        raw = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    enrichment = ModelEnrichment(
+        summary=one_line(str(raw.get("summary", ""))),
+        primer_prompts=[one_line(str(item)) for item in raw.get("primer_prompts", []) if one_line(str(item))],
+        tags=[normalize_tag(str(item)) for item in raw.get("tags", []) if normalize_tag(str(item))],
+        related=one_line(str(raw.get("related", ""))),
+    )
+    if enrichment_is_usable(entry, enrichment):
+        return enrichment
+    return None
+
+
+def enrichment_is_usable(entry: WorkEntry, enrichment: ModelEnrichment) -> bool:
+    title_key = normalize_lookup_text(entry.display_title)
+    summary_key = normalize_lookup_text(enrichment.summary)
+    if len(enrichment.summary.split()) < 12:
+        return False
+    if title_key and summary_key == title_key:
+        return False
+    return len(enrichment.primer_prompts) >= 2
+
+
+def normalize_tag(value: str) -> str:
+    value = re.sub(r"[^a-z0-9 -]+", "", value.lower())
+    value = re.sub(r"\s+", "-", value).strip("-")
+    return value[:32]
+
+
 def make_filename(entry: WorkEntry, config: Config, suffix: str | None = None) -> str:
     author = author_filename_key(entry.author)
     title = compact_pascal(entry.title) or "Untitled"
@@ -1288,6 +1456,8 @@ def parse_entry_block(author: str, block: list[str]) -> WorkEntry:
             entry.reading_time = line.removeprefix("Reading time:").strip()
         elif line.startswith("Summary:"):
             entry.summary = line.removeprefix("Summary:").strip()
+        elif line.startswith("Primer prompts:"):
+            entry.primer_prompts = parse_inline_list(line.removeprefix("Primer prompts:").strip(), separator=" | ")
         elif line.startswith("Tags:"):
             tags = line.removeprefix("Tags:").strip()
             entry.tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
@@ -1304,6 +1474,12 @@ def strip_code(value: str) -> str:
 
 def one_line(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def parse_inline_list(value: str, separator: str = " | ") -> list[str]:
+    if not value or value == "None.":
+        return []
+    return [item.strip() for item in value.split(separator) if item.strip()]
 
 
 def inline_code(value: str) -> str:
@@ -1358,10 +1534,16 @@ def render_entry(entry: WorkEntry) -> list[str]:
         f"  Sent: {one_line(entry.sent)}  ",
         f"  Reading time: {one_line(entry.reading_time)}  ",
         f"  Summary: {one_line(entry.summary)}  ",
+        f"  Primer prompts: {render_inline_list(entry.primer_prompts)}  ",
         f"  Tags: {one_line(', '.join(entry.tags))}  ",
         f"  Related: {one_line(entry.related)}  ",
         f"  Next action: {one_line(entry.next_action)}",
     ]
+
+
+def render_inline_list(values: list[str]) -> str:
+    cleaned = [one_line(value) for value in values if one_line(value)]
+    return " | ".join(cleaned) if cleaned else "None."
 
 
 def author_sort_key(author: str) -> str:
@@ -1416,16 +1598,22 @@ def command_lint(args: argparse.Namespace, root: Path) -> int:
 def command_reindex(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
+    use_model_enrichment = args.enrich or config.use_model_assistance
+    if use_model_enrichment and not config.model_command:
+        print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
+        return 2
     existing_entries = {entry.filename: entry for entry in read_index(config.index)}
     rebuilt: list[WorkEntry] = []
     use_catalog_lookup = args.lookup or config.use_catalog_lookup
 
     for path in library_reading_files(config):
-        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup)
+        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=use_model_enrichment)
         entry.filename = path.name
         old = existing_entries.get(path.name)
         if old:
             preserve_existing_state(entry, old)
+            if not use_model_enrichment:
+                preserve_existing_semantics(entry, old)
         rebuilt.append(entry)
 
     print(f"[dry-run] Reindex {len(rebuilt)} library file(s).")
@@ -1445,8 +1633,12 @@ def command_reindex(args: argparse.Namespace, root: Path) -> int:
 def command_maintain(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
+    use_model_enrichment = args.enrich or config.use_model_assistance
+    if use_model_enrichment and not config.model_command:
+        print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
+        return 2
     use_catalog_lookup = args.lookup or config.use_catalog_lookup
-    plan = build_maintenance_plan(config, use_catalog_lookup=use_catalog_lookup)
+    plan = build_maintenance_plan(config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=use_model_enrichment)
 
     print(f"[dry-run] Maintain {len(plan.entries)} library file(s).")
     if plan.renames:
@@ -1472,7 +1664,7 @@ def command_maintain(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
-def build_maintenance_plan(config: Config, use_catalog_lookup: bool = False) -> MaintenancePlan:
+def build_maintenance_plan(config: Config, use_catalog_lookup: bool = False, use_model_enrichment: bool = False) -> MaintenancePlan:
     existing_entries = {entry.filename: entry for entry in read_index(config.index)}
     library_files = library_reading_files(config)
     reserved = {path.name for path in library_files}
@@ -1480,10 +1672,12 @@ def build_maintenance_plan(config: Config, use_catalog_lookup: bool = False) -> 
     renames: list[RenamePlan] = []
 
     for path in library_files:
-        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup)
+        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=use_model_enrichment)
         old = existing_entries.get(path.name)
         if old:
             preserve_existing_state(entry, old)
+            if not use_model_enrichment:
+                preserve_existing_semantics(entry, old)
 
         desired_name = make_filename(entry, config, path.suffix.lower())
         if should_repair_filename(path.name, entry, desired_name):
@@ -1517,6 +1711,16 @@ def preserve_existing_state(entry: WorkEntry, old: WorkEntry) -> None:
     entry.added = old.added
     if entry.year == "nd" and old.year != "nd":
         entry.year = old.year
+
+
+def preserve_existing_semantics(entry: WorkEntry, old: WorkEntry) -> None:
+    if old.next_action != "clean":
+        return
+    entry.summary = old.summary
+    entry.primer_prompts = list(old.primer_prompts)
+    entry.tags = list(old.tags)
+    entry.related = old.related
+    entry.next_action = old.next_action
 
 
 @dataclass
@@ -1565,6 +1769,8 @@ def lint_entries(config: Config, entries: list[WorkEntry]) -> list[LintIssue]:
         for field_name in ["filename", "original_filename", "status", "sent", "summary", "next_action"]:
             if not getattr(entry, field_name):
                 issues.append(LintIssue("MISSING_FIELD", f"`{entry.title}` is missing {field_name}."))
+        if entry.next_action == "clean" and not entry.primer_prompts:
+            issues.append(LintIssue("MISSING_FIELD", f"`{entry.title}` is missing primer prompts."))
 
     quarantine_files = [path.name for path in supported_files(config, config.quarantine)]
     for filename in quarantine_files:
@@ -1620,7 +1826,7 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     plan = build_digest_plan(config, entries, allow_repeats=args.allow_repeats)
 
     if not plan:
-        print("No eligible unread works found.")
+        print("No digest-ready unread works found. Run `librarian enrich --apply` or ingest new files with `librarian ingest --enrich --apply`.")
         return 1
 
     print(f"[dry-run] Digest pick: {plan.entry.display_title} by {plan.entry.author}")
@@ -1649,16 +1855,72 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def command_enrich(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    if not config.model_command:
+        print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
+        return 2
+    entries = read_index(config.index)
+    selected = match_entries(entries, args.query) if args.query else [entry for entry in entries if entry.next_action == "needs_model"]
+    if not selected:
+        print("No entries matched enrichment criteria.")
+        return 1
+
+    changed = 0
+    for entry in selected:
+        path = config.library / entry.filename
+        text, review = extract_text_for_enrichment(path)
+        if review:
+            print(f"[dry-run] SKIP {entry.filename}: {'; '.join(review)}")
+            continue
+        enrichment = enrich_from_model(config, entry, text)
+        if not enrichment:
+            print(f"[dry-run] SKIP {entry.filename}: model returned incomplete enrichment.")
+            continue
+        print(f"[dry-run] ENRICH {entry.filename}: {enrichment.summary}")
+        if args.apply:
+            entry.summary = enrichment.summary
+            entry.primer_prompts = enrichment.primer_prompts
+            entry.tags = dedupe(entry.tags + enrichment.tags)[:6]
+            entry.related = enrichment.related or entry.related
+            entry.next_action = "clean"
+            changed += 1
+
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to update index.md.")
+        return 0
+    if changed:
+        write_index(config.index, entries)
+    print(f"Applied enrichment for {changed} entr{'y' if changed == 1 else 'ies'}.")
+    return 0
+
+
+def extract_text_for_enrichment(path: Path) -> tuple[str, list[str]]:
+    if not path.exists():
+        return "", [f"Missing file: {path.name}"]
+    if path.suffix.lower() == ".pdf":
+        _, text, review = extract_pdf(path)
+        if not text.strip() and not review:
+            review.append("No extractable text found; OCR is needed before model enrichment.")
+        return text, review
+    if path.suffix.lower() in {".txt", ".md"}:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace"), []
+        except OSError as exc:
+            return "", [f"Could not read text: {exc}"]
+    return "", [f"Text extraction not implemented for {path.suffix.lower()}."]
+
+
 def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: bool = False) -> DigestPlan | None:
     candidates = [
         entry
         for entry in entries
-        if entry.status not in {"read", "skipped"}
-        and not entry_needs_review(entry)
+        if entry_digest_ready(entry)
         and (allow_repeats or entry.sent == "never")
     ]
     if not candidates and allow_repeats:
-        candidates = [entry for entry in entries if entry.status not in {"read", "skipped"} and not entry_needs_review(entry)]
+        candidates = [entry for entry in entries if entry_digest_ready(entry)]
     if not candidates:
         return None
 
@@ -1686,9 +1948,7 @@ Why this is worth reading now:
 {digest_rationale(history)}
 
 Primer prompts:
-- What problem is this work responding to?
-- Which claim or image should I carry into the week?
-- What would change if I took this work seriously?
+{render_prompt_bullets(entry.primer_prompts)}
 
 Local file path:
 {local_path}
@@ -1747,6 +2007,33 @@ def digest_rationale(history: DigestHistory) -> str:
     return "This unread work is already in the local library and is being repeated intentionally."
 
 
+def render_prompt_bullets(prompts: list[str]) -> str:
+    return "\n".join(f"- {one_line(prompt)}" for prompt in prompts if one_line(prompt))
+
+
+def first_primer_prompt(entry: WorkEntry) -> str:
+    return one_line(entry.primer_prompts[0]) if entry.primer_prompts else "Review the enriched digest draft before reading."
+
+
+def entry_digest_ready(entry: WorkEntry) -> bool:
+    return (
+        entry.status not in {"read", "skipped"}
+        and not entry_needs_review(entry)
+        and entry.next_action == "clean"
+        and usable_digest_summary(entry)
+        and bool(entry.primer_prompts)
+    )
+
+
+def usable_digest_summary(entry: WorkEntry) -> bool:
+    summary_key = normalize_lookup_text(entry.summary)
+    title_key = normalize_lookup_text(entry.display_title)
+    if not summary_key or summary_key == title_key:
+        return False
+    blocked = ["needs review", "no extractable text", "ocr is needed"]
+    return not any(marker in entry.summary.lower() for marker in blocked)
+
+
 def render_digest_notification(entry: WorkEntry, draft_path: Path, history: DigestHistory) -> str:
     return "\n".join(
         [
@@ -1754,7 +2041,7 @@ def render_digest_notification(entry: WorkEntry, draft_path: Path, history: Dige
             f"Author: {entry.author}",
             f"Summary: {entry.summary}",
             f"History: {human_digest_history(history)}",
-            "Primer prompt: What problem is this work responding to?",
+            f"Primer prompt: {first_primer_prompt(entry)}",
             f"Draft: {draft_path}",
         ]
     )
@@ -1879,6 +2166,8 @@ def review_reasons(entry: WorkEntry) -> list[str]:
         reasons.append("OCR is needed before content-level summary or reading-time work.")
     if entry.next_action == "needs_manual":
         reasons.append("Automated metadata repair was not confident enough.")
+    if entry.next_action == "needs_model":
+        reasons.append("Model enrichment is needed for a reliable summary and work-specific primer prompts.")
     if "needs review" in summary:
         reasons.append("Summary or metadata needs review.")
     if "no extractable text" in summary or "ocr is needed" in summary:
@@ -1899,6 +2188,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest")
     ingest.add_argument("--apply", action="store_true")
     ingest.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
+    ingest.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
     lint = sub.add_parser("lint")
     lint.add_argument("--apply", action="store_true")
@@ -1906,10 +2196,16 @@ def build_parser() -> argparse.ArgumentParser:
     reindex = sub.add_parser("reindex")
     reindex.add_argument("--apply", action="store_true")
     reindex.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
+    reindex.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
     maintain = sub.add_parser("maintain")
     maintain.add_argument("--apply", action="store_true")
     maintain.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
+    maintain.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
+
+    enrich = sub.add_parser("enrich")
+    enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
+    enrich.add_argument("--apply", action="store_true")
 
     weekly = sub.add_parser("weekly-pick")
     weekly.add_argument("--apply", action="store_true")
@@ -1957,6 +2253,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_weekly_pick(args, root)
         if args.command == "digest":
             return command_digest(args, root)
+        if args.command == "enrich":
+            return command_enrich(args, root)
         if args.command == "list":
             return command_list(args, root)
         if args.command == "search":

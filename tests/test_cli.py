@@ -25,6 +25,34 @@ class LibrarianCliTests(unittest.TestCase):
         code, _ = self.run_cli(root, "init")
         self.assertEqual(code, 0)
 
+    def ready_entry(self, **kwargs: object) -> WorkEntry:
+        values = {
+            "author": "B, Author",
+            "title": "Never Sent",
+            "filename": "BAuthor_NeverSent_2001_book.txt",
+            "sent": "never",
+            "summary": "A specific summary that is ready for a weekly digest.",
+            "primer_prompts": ["What question does this work open?", "Which claim should I test while reading?"],
+            "next_action": "clean",
+        }
+        values.update(kwargs)
+        return WorkEntry(**values)
+
+    def fake_model_command(self, root: Path) -> str:
+        script = root / "fake_model.py"
+        script.write_text(
+            "import json, sys\n"
+            "json.load(sys.stdin)\n"
+            "print(json.dumps({\n"
+            "  'summary': 'This work argues through a concrete local example and gives the reader a focused problem to track.',\n"
+            "  'primer_prompts': ['What problem does the author make visible?', 'Which terms does the work ask me to reconsider?', 'What would count as evidence against the argument?'],\n"
+            "  'tags': ['theory', 'reading'],\n"
+            "  'related': 'None.'\n"
+            "}))\n",
+            encoding="utf-8",
+        )
+        return f"python3 {script}"
+
     def test_sample_fixture_dirs_live_under_tests(self) -> None:
         self.assertTrue((FIXTURES / "inbox").is_dir())
         self.assertTrue((FIXTURES / "library").is_dir())
@@ -199,8 +227,8 @@ class LibrarianCliTests(unittest.TestCase):
             root = Path(tmp)
             self.make_project(root)
             entries = [
-                WorkEntry(author="A, Author", title="Already Sent", filename="AAuthor_AlreadySent_2000_book.txt", sent="2026-01-01", summary="Ready."),
-                WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready."),
+                self.ready_entry(author="A, Author", title="Already Sent", filename="AAuthor_AlreadySent_2000_book.txt", sent="2026-01-01"),
+                self.ready_entry(),
             ]
             (root / "library" / "index.md").write_text(render_index(entries), encoding="utf-8")
 
@@ -214,7 +242,7 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            entry = self.ready_entry()
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
             existing = root / "_output" / "weekly-read-drafts" / f"{today()}_NeverSent.md"
             existing.write_text("existing draft", encoding="utf-8")
@@ -229,14 +257,14 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            entry = self.ready_entry()
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
 
             code, output = self.run_cli(root, "digest")
 
             self.assertEqual(code, 0)
             self.assertIn("Subject: Read of the Week", output)
-            self.assertIn("Summary:\nReady.", output)
+            self.assertIn("Summary:\nA specific summary that is ready for a weekly digest.", output)
             self.assertIn("Reading history:\nFirst time in the digest; never skipped.", output)
             self.assertIn("Primer prompts:", output)
             self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
@@ -245,27 +273,26 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            entry = self.ready_entry()
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
 
             code, output = self.run_cli(root, "digest", "--notify")
 
             self.assertEqual(code, 0)
             self.assertIn("NOTIFY: Read of the Week: Never Sent", output)
-            self.assertIn("Summary: Ready.", output)
+            self.assertIn("Summary: A specific summary that is ready for a weekly digest.", output)
             self.assertIn("History: First time in the digest; never skipped.", output)
-            self.assertIn("Primer prompt: What problem is this work responding to?", output)
+            self.assertIn("Primer prompt: What question does this work open?", output)
 
     def test_digest_history_counts_prior_sends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(
+            entry = self.ready_entry(
                 author="B, Author",
                 title="Already Sent",
                 filename="BAuthor_AlreadySent_2001_book.txt",
                 sent="2026-01-01",
-                summary="Ready.",
             )
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
             (root / "_state" / "sent-log.md").write_text(
@@ -285,7 +312,7 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            entry = self.ready_entry()
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
             (root / "_state" / "status-log.md").write_text(
                 "# Status Log\n\n"
@@ -302,7 +329,7 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            entry = self.ready_entry()
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
 
             with patch.dict(os.environ, {}, clear=True):
@@ -316,7 +343,7 @@ class LibrarianCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.make_project(root)
-            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            entry = self.ready_entry()
             (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
             env = {
                 "RESEND_API_KEY": "test-key",
@@ -332,6 +359,75 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertIn("Sent digest email.", output)
             self.assertTrue(urlopen.called)
             self.assertIn("emailed and drafted as", (root / "_state" / "sent-log.md").read_text(encoding="utf-8"))
+
+    def test_digest_skips_unenriched_model_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(
+                author="B, Author",
+                title="Never Sent",
+                filename="BAuthor_NeverSent_2001_book.txt",
+                sent="never",
+                summary="Never Sent",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "digest")
+
+            self.assertEqual(code, 1)
+            self.assertIn("No digest-ready unread works found", output)
+
+    def test_ingest_enrich_requires_model_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            (root / "inbox" / "BakerAnn_Test_2001_essay.txt").write_text("This is enough text to need semantic enrichment.", encoding="utf-8")
+
+            with patch.dict(os.environ, {}, clear=True):
+                code, output = self.run_cli(root, "ingest", "--enrich")
+
+            self.assertEqual(code, 2)
+            self.assertIn("Model enrichment requires", output)
+
+    def test_ingest_enrich_populates_summary_and_primer_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_command(root)
+            (root / "inbox" / "BakerAnn_Test_2001_essay.txt").write_text(
+                "This essay develops a focused argument about reading tools and attention.",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, _ = self.run_cli(root, "ingest", "--enrich", "--apply")
+
+            self.assertEqual(code, 0)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].next_action, "clean")
+            self.assertIn("concrete local example", entries[0].summary)
+            self.assertIn("What problem does the author make visible?", entries[0].primer_prompts)
+
+    def test_enrich_existing_entry_updates_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_command(root)
+            filename = "AuthorB_Test_2001_essay.txt"
+            (root / "library" / filename).write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            entry = WorkEntry(author="B, Author", title="Test", filename=filename, summary="Test.", next_action="needs_model")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "enrich", "Test", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied enrichment for 1 entry", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].next_action, "clean")
+            self.assertEqual(len(entries[0].primer_prompts), 3)
 
     def test_mark_read_requires_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -42,15 +42,20 @@ Test/sample files live under `tests/fixtures/`. Do not put test inboxes or test 
 librarian init
 librarian ingest
 librarian ingest --lookup
+librarian ingest --enrich --apply
 librarian ingest --apply
 librarian lint
 librarian lint --apply
 librarian reindex
 librarian reindex --lookup
+librarian reindex --enrich --apply
 librarian reindex --apply
 librarian maintain
 librarian maintain --lookup
+librarian maintain --enrich --apply
 librarian maintain --apply
+librarian enrich
+librarian enrich "Title or filename" --apply
 librarian digest
 librarian digest --notify
 librarian digest --email --apply
@@ -70,11 +75,13 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 `ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
 
+`ingest --enrich`, `reindex --enrich`, `maintain --enrich`, and `enrich` use a configured `model_command` to turn extracted text into a real summary, work-specific primer prompts, tags, and related-reading notes. Model enrichment is off by default.
+
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
 
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
-Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path.
+Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
 
 ## Metadata Pipeline
 
@@ -94,6 +101,34 @@ Each index entry includes `Next action` so humans and agents know what to do nex
 - `needs_ocr`: metadata is usable, but content extraction needs OCR.
 - `needs_manual`: automated repair was not confident enough.
 - `needs_model`: text and metadata are available; a model could improve summaries, tags, or prompts.
+
+## Model Enrichment Contract
+
+Configure a model command in `_state/config.toml` or with `LIBRARIAN_MODEL_COMMAND`.
+
+```toml
+[behavior]
+use_model_assistance = false
+model_command = ["path/to/enrich-command"]
+model_max_input_chars = 12000
+```
+
+The command receives JSON on stdin with the work metadata, instructions, and a text excerpt. It must print JSON on stdout:
+
+```json
+{
+  "summary": "One to three specific sentences about the work.",
+  "primer_prompts": [
+    "A work-specific question for entering the text.",
+    "A second work-specific question.",
+    "A third work-specific question."
+  ],
+  "tags": ["philosophy", "media"],
+  "related": "Optional concise related-reading note."
+}
+```
+
+The CLI rejects incomplete enrichment output. A usable enrichment needs a specific summary and at least two primer prompts.
 
 ## Filename Convention
 
@@ -119,7 +154,8 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 - After `librarian init`, `index.md`, ingest logs, sent/status logs, and weekly draft state are edited only by commands run with `--apply`.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
-- No SQL, database, wiki, or model call is used in the MVP.
+- No SQL, database, or wiki is used.
+- Model calls happen only when `--enrich`, `librarian enrich`, or `use_model_assistance = true` is configured.
 - Email is sent only when explicitly requested with `digest --email --apply` and configured through environment variables.
 - Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
 
