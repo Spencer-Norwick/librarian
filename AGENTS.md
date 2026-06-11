@@ -36,3 +36,4 @@ Mount protocol for new users or forks:
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.
 - See `docs/mount.md` for the full human and agent runbook.
+- See `docs/automation.md` for daily, weekly, and reply automation setup.

@@ -286,6 +286,7 @@ Mount protocol for new users or forks:
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.
 - See `docs/mount.md` for the full human and agent runbook.
+- See `docs/automation.md` for daily, weekly, and reply automation setup.
 """
 
 
@@ -374,6 +375,7 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 `mount` is the onboarding workflow for a new user or fork. It checks the local environment, detects available model CLIs, recommends a provider-neutral `model_command`, and previews `_state/config.toml` changes. `mount --check` is read-only. `mount --apply` writes local ignored config only.
 
 See `docs/mount.md` for the human and agent setup runbook.
+See `docs/automation.md` for daily and weekly scheduler setup.
 
 `daily` is the automation-friendly daily workflow. It ingests new inbox files, then runs lint. It does not reparse existing library files by default. Use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` for new files when those configured capabilities should run. Add `--maintain` only when you want the full library maintenance pass.
 
@@ -491,6 +493,8 @@ export LIBRARIAN_EMAIL_TO="you@example.com"
 ## Scheduling Examples
 
 The CLI does not install scheduled jobs automatically.
+
+The recommended automation commands are documented in `docs/automation.md`.
 
 ### cron
 
