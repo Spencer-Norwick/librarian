@@ -130,6 +130,30 @@ The command receives JSON on stdin with the work metadata, instructions, and a t
 
 The CLI rejects incomplete enrichment output. A usable enrichment needs a specific summary and at least two primer prompts.
 
+### Codex Adapter
+
+This repo includes a Codex CLI adapter for local use:
+
+```toml
+[behavior]
+model_command = ["python3", "scripts/enrich_with_codex.py"]
+model_max_input_chars = 12000
+```
+
+Or for a one-off command:
+
+```bash
+LIBRARIAN_MODEL_COMMAND="python3 scripts/enrich_with_codex.py" librarian enrich "Title or filename"
+```
+
+Use `--apply` only after reviewing the dry-run output:
+
+```bash
+LIBRARIAN_MODEL_COMMAND="python3 scripts/enrich_with_codex.py" librarian enrich "Title or filename" --apply
+```
+
+This sends the selected work metadata and a text excerpt to Codex/OpenAI through the local Codex CLI. Keep dry-run review as the default, and do not use this adapter for private or sensitive files unless that tradeoff is deliberate.
+
 ## Filename Convention
 
 ```text
