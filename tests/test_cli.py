@@ -370,6 +370,7 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].author, "Chiang, Ted")
             self.assertEqual(entries[0].title, "Stories Of Your Life")
             self.assertEqual(entries[0].year, "2002")
+            self.assertEqual(entries[0].next_action, "needs_ocr")
 
     def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -403,6 +404,7 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertFalse(stale.exists())
             entries = read_index(root / "library" / "index.md")
             self.assertEqual(entries[0].filename, repaired.name)
+            self.assertEqual(entries[0].next_action, "needs_model")
 
     def test_maintain_preserves_existing_year_when_local_inference_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

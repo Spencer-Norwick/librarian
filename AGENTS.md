@@ -12,6 +12,7 @@ Project rules for this reading librarian:
 - Prefer deterministic file operations.
 - Use model calls only when they materially improve metadata, summaries, tags, or reading prompts.
 - Prefer local PDF/text metadata extraction before optional external catalog lookup.
+- Follow the metadata pipeline: filename parse, embedded metadata, local text extraction, catalog lookup for weak metadata, OCR for scanned content, then model help only for semantic enrichment.
 - Write tests for destructive-path behavior.
 - Preserve original filenames in `index.md` and `_state/ingest-log.md`.
 - Keep actual reading files directly in `library/`.

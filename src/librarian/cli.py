@@ -65,6 +65,7 @@ class WorkEntry:
     tags: list[str] = field(default_factory=lambda: list(DEFAULT_TAGS))
     related: str = "None."
     needs_review: list[str] = field(default_factory=list)
+    next_action: str = "clean"
     added: str = ""
 
     @property
@@ -201,6 +202,7 @@ Project rules for this reading librarian:
 - Prefer deterministic file operations.
 - Use model calls only when they materially improve metadata, summaries, tags, or reading prompts.
 - Prefer local PDF/text metadata extraction before optional external catalog lookup.
+- Follow the metadata pipeline: filename parse, embedded metadata, local text extraction, catalog lookup for weak metadata, OCR for scanned content, then model help only for semantic enrichment.
 - Write tests for destructive-path behavior.
 - Preserve original filenames in `index.md` and `_state/ingest-log.md`.
 - Keep actual reading files directly in `library/`.
@@ -264,6 +266,9 @@ librarian lint --apply
 librarian reindex
 librarian reindex --lookup
 librarian reindex --apply
+librarian maintain
+librarian maintain --lookup
+librarian maintain --apply
 librarian weekly-pick
 librarian weekly-pick --apply
 librarian list
@@ -276,7 +281,28 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 `lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
 
-`ingest --lookup` and `reindex --lookup` use Open Library as an optional catalog fallback for missing publication years. Local PDF/text extraction is tried first, and lookup is off by default.
+`ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
+
+`maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
+
+## Metadata Pipeline
+
+The librarian uses the cheapest reliable step first:
+
+1. Parse filenames.
+2. Read embedded file metadata.
+3. Extract local text with command-line libraries such as `pypdf`.
+4. Use catalog lookup for weak title, author, or year metadata.
+5. Use OCR only when a file has no extractable text and content-level work is needed.
+6. Use model help only for semantic improvements such as summaries, tags, related works, and reading prompts.
+
+Each index entry includes `Next action` so humans and agents know what to do next:
+
+- `clean`: no immediate automated repair is needed.
+- `needs_catalog`: run lookup before OCR or model work.
+- `needs_ocr`: metadata is usable, but content extraction needs OCR.
+- `needs_manual`: automated repair was not confident enough.
+- `needs_model`: text and metadata are available; a model could improve summaries, tags, or prompts.
 
 ## Filename Convention
 
@@ -470,6 +496,14 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
     reading_minutes = max(1, round(word_count / config.reading_words_per_minute)) if word_count else 0
     summary = summarize_text(title, text, review)
     tags = infer_tags(title, text, work_type)
+    next_action = classify_next_action(
+        author=author,
+        title=title,
+        year=year,
+        text=text,
+        review=review,
+        summary=summary,
+    )
 
     return WorkEntry(
         author=author,
@@ -483,6 +517,7 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False) ->
         tags=tags,
         related="None.",
         needs_review=dedupe(review),
+        next_action=next_action,
         added=today(),
     )
 
@@ -1015,6 +1050,29 @@ def summarize_text(title: str, text: str, review: list[str]) -> str:
     return f"Local reading file titled {title}."
 
 
+def classify_next_action(author: str, title: str, year: str, text: str, review: list[str], summary: str) -> str:
+    weak_metadata = author == "Unknown" or "," not in author or title == "Untitled" or year == "nd"
+    no_text = not text.strip()
+    if weak_metadata:
+        return "needs_catalog"
+    if no_text:
+        return "needs_ocr"
+    if any("Catalog lookup failed" in item or "failed" in item.lower() for item in review):
+        return "needs_manual"
+    if review:
+        return "needs_manual"
+    if model_would_help(summary):
+        return "needs_model"
+    return "clean"
+
+
+def model_would_help(summary: str) -> bool:
+    lower = summary.lower()
+    if not summary.strip():
+        return True
+    return not any(marker in lower for marker in ["needs review", "no extractable text", "ocr is needed"])
+
+
 def infer_tags(title: str, text: str, work_type: str) -> list[str]:
     lower = f"{title} {text[:5000]}".lower()
     tags = [work_type] if work_type != "unknown" else ["reading"]
@@ -1200,6 +1258,8 @@ def parse_entry_block(author: str, block: list[str]) -> WorkEntry:
             entry.tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
         elif line.startswith("Related:"):
             entry.related = line.removeprefix("Related:").strip()
+        elif line.startswith("Next action:"):
+            entry.next_action = line.removeprefix("Next action:").strip()
     return entry
 
 
@@ -1264,7 +1324,8 @@ def render_entry(entry: WorkEntry) -> list[str]:
         f"  Reading time: {one_line(entry.reading_time)}  ",
         f"  Summary: {one_line(entry.summary)}  ",
         f"  Tags: {one_line(', '.join(entry.tags))}  ",
-        f"  Related: {one_line(entry.related)}",
+        f"  Related: {one_line(entry.related)}  ",
+        f"  Next action: {one_line(entry.next_action)}",
     ]
 
 
@@ -1363,7 +1424,7 @@ def command_maintain(args: argparse.Namespace, root: Path) -> int:
     if review_entries:
         for entry in sorted(review_entries, key=lambda item: (item.author_key, item.display_title.lower())):
             reasons = "; ".join(review_reasons(entry))
-            print(f"[dry-run] REVIEW: {entry.filename} — {entry.author} — {entry.display_title}: {reasons}")
+            print(f"[dry-run] REVIEW {entry.next_action}: {entry.filename} — {entry.author} — {entry.display_title}: {reasons}")
 
     if not args.apply:
         print("Dry run only. Re-run with --apply to rename files and rebuild index.md.")
@@ -1466,7 +1527,7 @@ def lint_entries(config: Config, entries: list[WorkEntry]) -> list[LintIssue]:
             issues.append(LintIssue("AUTHOR_SPELLING", f"Possible inconsistent author spelling: {author_keys[compact]} / {entry.author}."))
         author_keys[compact] = entry.author
 
-        for field_name in ["filename", "original_filename", "status", "sent", "summary"]:
+        for field_name in ["filename", "original_filename", "status", "sent", "summary", "next_action"]:
             if not getattr(entry, field_name):
                 issues.append(LintIssue("MISSING_FIELD", f"`{entry.title}` is missing {field_name}."))
 
@@ -1639,6 +1700,12 @@ def entry_needs_review(entry: WorkEntry) -> bool:
 def review_reasons(entry: WorkEntry) -> list[str]:
     reasons = list(entry.needs_review)
     summary = entry.summary.lower()
+    if entry.next_action == "needs_catalog":
+        reasons.append("Metadata is weak; catalog lookup is the next cheap repair step.")
+    if entry.next_action == "needs_ocr":
+        reasons.append("OCR is needed before content-level summary or reading-time work.")
+    if entry.next_action == "needs_manual":
+        reasons.append("Automated metadata repair was not confident enough.")
     if "needs review" in summary:
         reasons.append("Summary or metadata needs review.")
     if "no extractable text" in summary or "ocr is needed" in summary:
@@ -1658,7 +1725,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest = sub.add_parser("ingest")
     ingest.add_argument("--apply", action="store_true")
-    ingest.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for missing years.")
+    ingest.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
 
     lint = sub.add_parser("lint")
     lint.add_argument("--apply", action="store_true")

@@ -48,6 +48,9 @@ librarian lint --apply
 librarian reindex
 librarian reindex --lookup
 librarian reindex --apply
+librarian maintain
+librarian maintain --lookup
+librarian maintain --apply
 librarian weekly-pick
 librarian weekly-pick --apply
 librarian list
@@ -62,7 +65,28 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 `reindex --apply` rebuilds `index.md` metadata for files already in `library/` while preserving each entry's status, sent date, and original filename when possible.
 
-`ingest --lookup` and `reindex --lookup` use Open Library as an optional catalog fallback for missing publication years. Local PDF/text extraction is tried first, and lookup is off by default.
+`ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
+
+`maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
+
+## Metadata Pipeline
+
+The librarian uses the cheapest reliable step first:
+
+1. Parse filenames.
+2. Read embedded file metadata.
+3. Extract local text with command-line libraries such as `pypdf`.
+4. Use catalog lookup for weak title, author, or year metadata.
+5. Use OCR only when a file has no extractable text and content-level work is needed.
+6. Use model help only for semantic improvements such as summaries, tags, related works, and reading prompts.
+
+Each index entry includes `Next action` so humans and agents know what to do next:
+
+- `clean`: no immediate automated repair is needed.
+- `needs_catalog`: run lookup before OCR or model work.
+- `needs_ocr`: metadata is usable, but content extraction needs OCR.
+- `needs_manual`: automated repair was not confident enough.
+- `needs_model`: text and metadata are available; a model could improve summaries, tags, or prompts.
 
 ## Filename Convention
 
