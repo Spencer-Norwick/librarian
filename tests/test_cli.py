@@ -53,6 +53,15 @@ class LibrarianCliTests(unittest.TestCase):
         )
         return f"python3 {script}"
 
+    def fake_ocr_command(self, root: Path) -> str:
+        script = root / "fake_ocr.py"
+        script.write_text(
+            "import shutil, sys\n"
+            "shutil.copyfile(sys.argv[-2], sys.argv[-1])\n",
+            encoding="utf-8",
+        )
+        return f"python3 {script}"
+
     def test_sample_fixture_dirs_live_under_tests(self) -> None:
         self.assertTrue((FIXTURES / "inbox").is_dir())
         self.assertTrue((FIXTURES / "library").is_dir())
@@ -798,6 +807,51 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].title, "Stories Of Your Life")
             self.assertEqual(entries[0].year, "2002")
             self.assertEqual(entries[0].next_action, "needs_ocr")
+
+    def test_ocr_dry_run_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "ChiangTed_StoriesOfYourLife_2002_story.pdf"
+            source.write_bytes(b"%PDF-1.4 scanned placeholder\n")
+            entry = self.ready_entry(
+                author="Chiang, Ted",
+                title="Stories Of Your Life",
+                filename=source.name,
+                next_action="needs_ocr",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "ocr")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] OCR Stories Of Your Life", output)
+            self.assertIn("Dry run only", output)
+            self.assertEqual(list((root / "_output" / "ocr").glob("*.pdf")), [])
+
+    def test_ocr_apply_writes_no_overwrite_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "ChiangTed_StoriesOfYourLife_2002_story.pdf"
+            source.write_bytes(b"%PDF-1.4 scanned placeholder\n")
+            entry = self.ready_entry(
+                author="Chiang, Ted",
+                title="Stories Of Your Life",
+                filename=source.name,
+                next_action="needs_ocr",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            existing = root / "_output" / "ocr" / source.name
+            existing.write_bytes(b"existing")
+
+            with patch.dict(os.environ, {"LIBRARIAN_OCR_COMMAND": self.fake_ocr_command(root)}):
+                code, output = self.run_cli(root, "ocr", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Wrote _output/ocr/ChiangTed_StoriesOfYourLife_2002_story_2.pdf", output)
+            self.assertEqual(existing.read_bytes(), b"existing")
+            self.assertEqual((root / "_output" / "ocr" / "ChiangTed_StoriesOfYourLife_2002_story_2.pdf").read_bytes(), source.read_bytes())
 
     def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

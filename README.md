@@ -63,6 +63,8 @@ librarian maintain --enrich --apply
 librarian maintain --apply
 librarian enrich
 librarian enrich "Title or filename" --apply
+librarian ocr
+librarian ocr "Title or filename" --apply
 librarian digest
 librarian digest --notify
 librarian digest --email --apply
@@ -95,6 +97,8 @@ See `docs/automation.md` for daily and weekly scheduler setup.
 `ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
 
 `ingest --enrich`, `reindex --enrich`, `maintain --enrich`, and `enrich` use a configured `model_command` to turn extracted text into a real summary, work-specific primer prompts, tags, and related-reading notes. Model enrichment is off by default.
+
+`ocr` is the local scanned-PDF repair bridge. It previews entries marked `needs_ocr` by default. With `--apply`, it runs the configured `ocr_command` and writes a no-overwrite OCR copy to `_output/ocr/` for review; it does not replace or delete library files.
 
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
 

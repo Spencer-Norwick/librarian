@@ -35,5 +35,6 @@ Mount protocol for new users or forks:
 - If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.
+- Use `librarian ocr` for scanned-PDF repair; do not replace or delete library files automatically.
 - See `docs/mount.md` for the full human and agent runbook.
 - See `docs/automation.md` for daily, weekly, and reply automation setup.

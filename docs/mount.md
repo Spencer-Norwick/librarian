@@ -19,6 +19,8 @@ Do not ingest files, enrich entries, create automations, or send email during mo
 
 If model enrichment is desired, set up a provider-specific local hook after mount. Keep that hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
 
+If scanned-PDF repair is desired, use `librarian ocr` after mount. It writes OCR copies under `_output/ocr/` and does not replace library files automatically.
+
 If automation is desired, follow `docs/automation.md` after mount.
 
 ## User Choices
@@ -74,6 +76,8 @@ The public repo intentionally does not ship separate adapters for Codex, Claude,
 Automation should prefer `librarian daily` and `librarian weekly` instead of stitching together lower-level commands.
 
 See `docs/automation.md` for the scheduler setup protocol.
+
+OCR should prefer `librarian ocr` instead of ad hoc file replacement. The default command is `ocrmypdf --skip-text`, and local users can override it with `ocr_command` in `_state/config.toml` or `LIBRARIAN_OCR_COMMAND`.
 
 Reply handlers should prefer `librarian reply` instead of editing `index.md` directly:
 

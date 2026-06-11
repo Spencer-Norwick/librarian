@@ -46,9 +46,11 @@ class Config:
     status_log: Path
     quarantine: Path
     drafts: Path
+    ocr_outputs: Path
     supported_extensions: set[str] = field(default_factory=lambda: set(SUPPORTED_EXTENSIONS))
     reading_words_per_minute: int = 250
     max_filename_stem_chars: int = 96
+    ocr_command: list[str] = field(default_factory=lambda: ["ocrmypdf", "--skip-text"])
     use_catalog_lookup: bool = False
     catalog_timeout_seconds: float = 5.0
     use_model_assistance: bool = False
@@ -161,9 +163,11 @@ def project_config(root: Path) -> Config:
         status_log=p("status_log", "_state/status-log.md"),
         quarantine=p("quarantine", "_quarantine"),
         drafts=p("weekly_read_drafts", "_output/weekly-read-drafts"),
+        ocr_outputs=p("ocr_outputs", "_output/ocr"),
         supported_extensions={ext.lower() for ext in supported},
         reading_words_per_minute=int(behavior.get("reading_words_per_minute", 250)),
         max_filename_stem_chars=int(behavior.get("max_filename_stem_chars", 96)),
+        ocr_command=ocr_command(behavior.get("ocr_command", ["ocrmypdf", "--skip-text"])),
         use_catalog_lookup=bool(behavior.get("use_catalog_lookup", False)),
         catalog_timeout_seconds=float(behavior.get("catalog_timeout_seconds", 5.0)),
         use_model_assistance=bool(behavior.get("use_model_assistance", False)),
@@ -174,7 +178,7 @@ def project_config(root: Path) -> Config:
 
 
 def ensure_dirs(config: Config) -> None:
-    for path in [config.inbox, config.library, config.state, config.quarantine, config.drafts]:
+    for path in [config.inbox, config.library, config.state, config.quarantine, config.drafts, config.ocr_outputs]:
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -195,6 +199,17 @@ def model_command(value: object) -> list[str]:
     if isinstance(value, str) and value.strip():
         return shlex.split(value)
     return []
+
+
+def ocr_command(value: object) -> list[str]:
+    env_value = os.environ.get("LIBRARIAN_OCR_COMMAND", "")
+    if env_value:
+        return shlex.split(env_value)
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return shlex.split(value)
+    return ["ocrmypdf", "--skip-text"]
 
 
 def init_project(root: Path) -> int:
@@ -229,11 +244,13 @@ sent_log = "_state/sent-log.md"
 status_log = "_state/status-log.md"
 quarantine = "_quarantine"
 weekly_read_drafts = "_output/weekly-read-drafts"
+ocr_outputs = "_output/ocr"
 
 [behavior]
 supported_extensions = [".pdf", ".epub", ".txt", ".md", ".docx"]
 reading_words_per_minute = 250
 max_filename_stem_chars = 96
+ocr_command = ["ocrmypdf", "--skip-text"]
 use_model_assistance = false
 model_command = []
 model_max_input_chars = 12000
@@ -285,6 +302,7 @@ Mount protocol for new users or forks:
 - If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.
+- Use `librarian ocr` for scanned-PDF repair; do not replace or delete library files automatically.
 - See `docs/mount.md` for the full human and agent runbook.
 - See `docs/automation.md` for daily, weekly, and reply automation setup.
 """
@@ -356,6 +374,8 @@ librarian maintain --enrich --apply
 librarian maintain --apply
 librarian enrich
 librarian enrich "Title or filename" --apply
+librarian ocr
+librarian ocr "Title or filename" --apply
 librarian digest
 librarian digest --notify
 librarian digest --email --apply
@@ -386,6 +406,8 @@ See `docs/automation.md` for daily and weekly scheduler setup.
 `ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
 
 `ingest --enrich`, `reindex --enrich`, `maintain --enrich`, and `enrich` use a configured `model_command` to turn extracted text into a real summary, work-specific primer prompts, tags, and related-reading notes. Model enrichment is off by default.
+
+`ocr` is the local scanned-PDF repair bridge. It previews entries marked `needs_ocr` by default. With `--apply`, it runs the configured `ocr_command` and writes a no-overwrite OCR copy to `_output/ocr/` for review; it does not replace or delete library files.
 
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
 
@@ -1692,6 +1714,8 @@ def build_mount_recommendation(root: Path, args: argparse.Namespace) -> MountRec
     checks.append(("OK" if (root / ".git").exists() else "WARN", "git", "Git repo found." if (root / ".git").exists() else "No .git directory found."))
     checks.append(("OK" if Path(python).exists() or shutil.which(python) else "WARN", "python", python))
     checks.append(("OK" if python_has_module(python, "pypdf") else "WARN", "pdf_parser", "pypdf available" if python_has_module(python, "pypdf") else "Install optional dependency with `python -m pip install -e '.[pdf]'`."))
+    checks.append(("OK" if shutil.which("ocrmypdf") else "WARN", "ocr_tool", "ocrmypdf available" if shutil.which("ocrmypdf") else "Install `ocrmypdf` for local scanned-PDF repair."))
+    checks.append(("OK" if shutil.which("tesseract") else "WARN", "ocr_engine", "tesseract available" if shutil.which("tesseract") else "`ocrmypdf` usually needs Tesseract installed."))
 
     detected = detected_model_commands()
     for name, path in detected.items():
@@ -1715,6 +1739,13 @@ def python_has_module(python: str, module: str) -> bool:
     except OSError:
         return False
     return completed.returncode == 0
+
+
+def command_available(command: str) -> bool:
+    path = Path(command)
+    if path.parent != Path("."):
+        return path.exists() and os.access(path, os.X_OK)
+    return shutil.which(command) is not None
 
 
 def detected_model_commands() -> dict[str, str]:
@@ -2228,6 +2259,67 @@ def command_enrich(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def command_ocr(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    entries = read_index(config.index)
+    selected = match_entries(entries, args.query) if args.query else [entry for entry in entries if entry.next_action == "needs_ocr"]
+    if not selected:
+        print("No entries matched OCR criteria.")
+        return 1
+
+    plans: list[tuple[WorkEntry, Path, Path]] = []
+    for entry in selected:
+        source = config.library / entry.filename
+        if source.suffix.lower() != ".pdf":
+            print(f"[dry-run] SKIP {entry.filename}: OCR is only implemented for PDF files.")
+            continue
+        if not source.exists():
+            print(f"[dry-run] SKIP {entry.filename}: missing library file.")
+            continue
+        target = unique_path(config.ocr_outputs / entry.filename)
+        plans.append((entry, source, target))
+
+    if not plans:
+        print("No OCR-ready PDF entries found.")
+        return 1
+
+    prefix = "[dry-run] " if not args.apply else ""
+    for entry, source, target in plans:
+        print(f"{prefix}OCR {entry.display_title}: {source.relative_to(root)} -> {target.relative_to(root)}")
+
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to write OCR copies under _output/ocr/.")
+        return 0
+
+    if not config.ocr_command:
+        print("OCR requires `ocr_command` in _state/config.toml or LIBRARIAN_OCR_COMMAND.")
+        return 2
+    if not command_available(config.ocr_command[0]):
+        print(f"OCR command not found: {config.ocr_command[0]}")
+        return 2
+
+    changed = 0
+    for entry, source, target in plans:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run(
+            config.ocr_command + [str(source), str(target)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            print(f"SKIP {entry.filename}: OCR command failed.")
+            if completed.stderr.strip():
+                print(completed.stderr.strip())
+            continue
+        changed += 1
+        print(f"Wrote {target.relative_to(root)}.")
+    print(f"Applied OCR for {changed} entr{'y' if changed == 1 else 'ies'}.")
+    return 0
+
+
 def extract_text_for_enrichment(path: Path) -> tuple[str, list[str]]:
     if not path.exists():
         return "", [f"Missing file: {path.name}"]
@@ -2559,6 +2651,10 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
     enrich.add_argument("--apply", action="store_true")
 
+    ocr = sub.add_parser("ocr")
+    ocr.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_ocr entries.")
+    ocr.add_argument("--apply", action="store_true")
+
     weekly = sub.add_parser("weekly-pick")
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
@@ -2622,6 +2718,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_reply(args, root)
         if args.command == "enrich":
             return command_enrich(args, root)
+        if args.command == "ocr":
+            return command_ocr(args, root)
         if args.command == "list":
             return command_list(args, root)
         if args.command == "search":
