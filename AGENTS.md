@@ -29,7 +29,9 @@ Mount protocol for new users or forks:
 - Treat `librarian mount` as dry-run setup preview.
 - Write local config only with `librarian mount --apply`.
 - Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
-- Prefer `privacy=assisted`, `digest=notify`, and explicit user approval before sending text excerpts to an external model.
+- Prefer `privacy=assisted` and `digest=notify`.
+- Before sending text excerpts to an external model, check `_state/config.toml` for `require_external_model_approval`; if it is missing or true, ask for explicit user approval.
+- If `require_external_model_approval = false`, the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
 - If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.

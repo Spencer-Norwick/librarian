@@ -95,6 +95,7 @@ Configure it with:
 use_model_assistance = false
 model_command = ["_state/model-enrich-local"]
 model_max_input_chars = 12000
+require_external_model_approval = true
 ```
 
 Before using real library files, test the hook with synthetic text:
@@ -115,7 +116,10 @@ Expected output shape:
 }
 ```
 
-After the synthetic test passes, ask the user for explicit approval before sending excerpts from real library files to any external model provider.
+After the synthetic test passes, check `require_external_model_approval` before sending excerpts from real library files to any external model provider.
+
+- `true` or missing: ask the user for explicit approval before each new real-file enrichment batch.
+- `false`: the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
 
 ## Safety
 

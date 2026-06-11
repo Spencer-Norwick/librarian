@@ -126,6 +126,7 @@ Configure a model command in `_state/config.toml` or with `LIBRARIAN_MODEL_COMMA
 use_model_assistance = false
 model_command = ["path/to/enrich-command"]
 model_max_input_chars = 12000
+require_external_model_approval = true
 ```
 
 The command receives JSON on stdin with the work metadata, instructions, and a text excerpt. It must print JSON on stdout:
@@ -172,6 +173,8 @@ The command may be a shell script, Python script, local binary, or model CLI wra
 If the command calls an external model provider, it may send selected work metadata and a text excerpt outside the user's machine. Keep dry-run review as the default, and do not use external enrichment for private or sensitive files unless that tradeoff is deliberate.
 
 For public forks, provider-specific hooks should be created in ignored local state such as `_state/model-enrich-local`, then configured through `_state/config.toml` or `LIBRARIAN_MODEL_COMMAND`. See `docs/mount.md` for the agent setup protocol and synthetic hook test.
+
+`require_external_model_approval` is the project-level consent toggle for agents. The public default is `true`; a local user can set it to `false` in ignored `_state/config.toml` after deciding that the configured provider may receive enrichment excerpts.
 
 ## Filename Convention
 

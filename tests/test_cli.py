@@ -84,6 +84,7 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("[dry-run] Mount config target:", output)
             self.assertIn("model_command = []", output)
+            self.assertIn("require_external_model_approval = true", output)
             self.assertIn("Dry run only", output)
             self.assertEqual(config_path.read_text(encoding="utf-8"), before)
 

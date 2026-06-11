@@ -54,6 +54,7 @@ class Config:
     use_model_assistance: bool = False
     model_command: list[str] = field(default_factory=list)
     model_max_input_chars: int = 12000
+    require_external_model_approval: bool = True
 
 
 @dataclass
@@ -168,6 +169,7 @@ def project_config(root: Path) -> Config:
         use_model_assistance=bool(behavior.get("use_model_assistance", False)),
         model_command=model_command(behavior.get("model_command", [])),
         model_max_input_chars=int(behavior.get("model_max_input_chars", 12000)),
+        require_external_model_approval=bool(behavior.get("require_external_model_approval", True)),
     )
 
 
@@ -235,6 +237,7 @@ max_filename_stem_chars = 96
 use_model_assistance = false
 model_command = []
 model_max_input_chars = 12000
+require_external_model_approval = true
 use_catalog_lookup = false
 catalog_timeout_seconds = 5
 """
@@ -276,7 +279,9 @@ Mount protocol for new users or forks:
 - Treat `librarian mount` as dry-run setup preview.
 - Write local config only with `librarian mount --apply`.
 - Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
-- Prefer `privacy=assisted`, `digest=notify`, and explicit user approval before sending text excerpts to an external model.
+- Prefer `privacy=assisted` and `digest=notify`.
+- Before sending text excerpts to an external model, check `_state/config.toml` for `require_external_model_approval`; if it is missing or true, ask for explicit user approval.
+- If `require_external_model_approval = false`, the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
 - If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.
@@ -411,6 +416,7 @@ Configure a model command in `_state/config.toml` or with `LIBRARIAN_MODEL_COMMA
 use_model_assistance = false
 model_command = ["path/to/enrich-command"]
 model_max_input_chars = 12000
+require_external_model_approval = true
 ```
 
 The command receives JSON on stdin with the work metadata, instructions, and a text excerpt. It must print JSON on stdout:
@@ -437,6 +443,8 @@ The public project does not ship provider-specific model adapters. Keep model us
 The command may be a shell script, Python script, local binary, or model CLI wrapper. It must read the librarian JSON payload from stdin and print the enrichment JSON schema above to stdout.
 
 For public forks, provider-specific hooks should be created in ignored local state such as `_state/model-enrich-local`, then configured through `_state/config.toml` or `LIBRARIAN_MODEL_COMMAND`. See `docs/mount.md` for the agent setup protocol and synthetic hook test.
+
+`require_external_model_approval` is the project-level consent toggle for agents. The public default is `true`; a local user can set it to `false` in ignored `_state/config.toml` after deciding that the configured provider may receive enrichment excerpts.
 
 ## Filename Convention
 
@@ -1759,6 +1767,7 @@ def mounted_config(raw: dict, args: argparse.Namespace, recommended_model_comman
     merged["behavior"]["model_command"] = recommended_model_command
     merged["behavior"]["use_model_assistance"] = args.privacy == "automatic" and bool(recommended_model_command)
     merged["behavior"]["use_catalog_lookup"] = bool(behavior.get("use_catalog_lookup", False))
+    merged["behavior"]["require_external_model_approval"] = bool(behavior.get("require_external_model_approval", True))
     return merged
 
 
