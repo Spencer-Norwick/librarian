@@ -364,7 +364,7 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 See `docs/mount.md` for the human and agent setup runbook.
 
-`daily` is the automation-friendly daily workflow. It runs ingest, maintain, and lint in order. It is dry-run by default; use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` only when those configured capabilities should run.
+`daily` is the automation-friendly daily workflow. It ingests new inbox files, then runs lint. It does not reparse existing library files by default. Use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` for new files when those configured capabilities should run. Add `--maintain` only when you want the full library maintenance pass.
 
 `weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 
@@ -1852,13 +1852,14 @@ def command_daily(args: argparse.Namespace, root: Path) -> int:
     if ingest_code:
         return ingest_code
 
-    print("Daily workflow: maintain")
-    maintain_code = command_maintain(
-        argparse.Namespace(apply=args.apply, lookup=args.lookup, enrich=args.enrich),
-        root,
-    )
-    if maintain_code:
-        return maintain_code
+    if args.maintain:
+        print("Daily workflow: maintain")
+        maintain_code = command_maintain(
+            argparse.Namespace(apply=args.apply, lookup=args.lookup, enrich=args.enrich),
+            root,
+        )
+        if maintain_code:
+            return maintain_code
 
     print("Daily workflow: lint")
     return command_lint(argparse.Namespace(apply=False), root)
@@ -2427,6 +2428,7 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--apply", action="store_true")
     daily.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     daily.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
+    daily.add_argument("--maintain", action="store_true", help="Also run the full library maintenance pass.")
 
     weekly = sub.add_parser("weekly")
     weekly.add_argument("--apply", action="store_true")

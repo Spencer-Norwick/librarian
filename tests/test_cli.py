@@ -194,8 +194,8 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("Daily workflow: ingest", output)
-            self.assertIn("Daily workflow: maintain", output)
             self.assertIn("Daily workflow: lint", output)
+            self.assertNotIn("Daily workflow: maintain", output)
             self.assertTrue(source.exists())
             self.assertEqual(read_index(root / "library" / "index.md"), [])
 
@@ -213,6 +213,17 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertIn("No lint issues found.", output)
             self.assertFalse(source.exists())
             self.assertTrue((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
+
+    def test_daily_maintain_opt_in_runs_full_library_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+
+            code, output = self.run_cli(root, "daily", "--maintain")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Daily workflow: maintain", output)
+            self.assertIn("[dry-run] Maintain", output)
 
     def test_collision_gets_stable_hash_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
