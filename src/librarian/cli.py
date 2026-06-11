@@ -360,6 +360,9 @@ librarian digest --notify
 librarian digest --email --apply
 librarian weekly-pick
 librarian weekly-pick --apply
+librarian reply skip --apply
+librarian reply read --apply
+librarian reply new --apply
 librarian list
 librarian search "query"
 librarian mark-read "Title or filename" --apply
@@ -387,6 +390,8 @@ See `docs/mount.md` for the human and agent setup runbook.
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
 Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
+
+`reply` is the command-line target for automation or email-reply handlers. It acts on the latest sent digest from `_state/sent-log.md`: `reply skip --apply` marks it skipped, `reply read --apply` marks it read, and `reply new --apply` marks it skipped and writes the next digest-ready draft. Like the rest of the tool, it previews by default.
 
 ## Metadata Pipeline
 
@@ -2090,6 +2095,94 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def command_reply(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    entries = read_index(config.index)
+    current = latest_sent_entry(config, entries)
+    if not current:
+        print("No sent digest found. Run `librarian weekly --apply` before using reply commands.")
+        return 1
+
+    target_status = "read" if args.action == "read" else "skipped"
+    prefix = "[dry-run] " if not args.apply else ""
+    print(f"{prefix}Latest digest: {current.display_title}: {current.status} -> {target_status}")
+
+    if args.action in {"read", "skip"}:
+        if not args.apply:
+            print("Dry run only. Re-run with --apply to update index.md.")
+            return 0
+        update_entry_status(config, entries, current, target_status)
+        print(f"Updated {current.display_title} to {target_status}.")
+        return 0
+
+    old_status = current.status
+    current.status = "skipped"
+    plan = build_digest_plan(config, entries, allow_repeats=args.allow_repeats)
+    if not plan:
+        current.status = old_status
+        print("No replacement digest-ready unread works found.")
+        if not args.apply:
+            print("Dry run only. Re-run with --apply to mark the latest digest skipped anyway.")
+        return 1
+
+    print(f"{prefix}Replacement digest pick: {plan.entry.display_title} by {plan.entry.author}")
+    print(f"{prefix}Draft path: {plan.draft_path.relative_to(root)}")
+    if not args.no_notify:
+        print(render_digest_notification(plan.entry, plan.draft_path, plan.history))
+    if not args.apply:
+        print(plan.body)
+        print("Dry run only. Re-run with --apply to skip the current pick and write the replacement draft.")
+        if args.email:
+            print("Email not sent in dry-run mode.")
+        return 0
+
+    if args.email:
+        require_email_config()
+    write_text_without_overwrite(plan.draft_path, plan.body)
+    if args.email:
+        send_digest_email(plan.entry, plan.body)
+    if old_status != "skipped":
+        append_status_log(config.status_log, current, old_status, "skipped")
+    plan.entry.sent = today()
+    entries = upsert_entry(entries, plan.entry)
+    write_index(config.index, entries)
+    append_sent_log(config.sent_log, plan.entry, plan.draft_path, emailed=args.email)
+    print(f"Updated {current.display_title} to skipped.")
+    print(f"Wrote {plan.draft_path.relative_to(root)}.")
+    if args.email:
+        print("Sent digest email.")
+    return 0
+
+
+def latest_sent_entry(config: Config, entries: list[WorkEntry]) -> WorkEntry | None:
+    filename = latest_sent_filename(config.sent_log)
+    if filename:
+        return next((entry for entry in entries if entry.filename == filename), None)
+    sent_entries = [entry for entry in entries if entry.sent != "never"]
+    if not sent_entries:
+        return None
+    return sorted(sent_entries, key=lambda entry: (entry.sent, entry.author_key, entry.display_title.lower()), reverse=True)[0]
+
+
+def latest_sent_filename(path: Path) -> str:
+    if not path.exists():
+        return ""
+    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+        match = re.search(r"`([^`]+)`", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def update_entry_status(config: Config, entries: list[WorkEntry], entry: WorkEntry, status: str) -> None:
+    old_status = entry.status
+    entry.status = status
+    write_index(config.index, entries)
+    if old_status != status:
+        append_status_log(config.status_log, entry, old_status, status)
+
+
 def command_enrich(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
@@ -2474,6 +2567,13 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--notify", action="store_true")
     digest.add_argument("--email", action="store_true")
 
+    reply = sub.add_parser("reply")
+    reply.add_argument("action", choices=["skip", "read", "new"])
+    reply.add_argument("--apply", action="store_true")
+    reply.add_argument("--allow-repeats", action="store_true")
+    reply.add_argument("--no-notify", action="store_true")
+    reply.add_argument("--email", action="store_true")
+
     sub.add_parser("list")
 
     search = sub.add_parser("search")
@@ -2514,6 +2614,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_weekly_pick(args, root)
         if args.command == "digest":
             return command_digest(args, root)
+        if args.command == "reply":
+            return command_reply(args, root)
         if args.command == "enrich":
             return command_enrich(args, root)
         if args.command == "list":

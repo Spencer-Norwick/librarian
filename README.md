@@ -68,6 +68,9 @@ librarian digest --notify
 librarian digest --email --apply
 librarian weekly-pick
 librarian weekly-pick --apply
+librarian reply skip --apply
+librarian reply read --apply
+librarian reply new --apply
 librarian list
 librarian search "query"
 librarian mark-read "Title or filename" --apply
@@ -97,6 +100,8 @@ See `docs/mount.md` for the human and agent setup runbook.
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
 Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
+
+`reply` is the command-line target for automation or email-reply handlers. It acts on the latest sent digest from `_state/sent-log.md`: `reply skip --apply` marks it skipped, `reply read --apply` marks it read, and `reply new --apply` marks it skipped and writes the next digest-ready draft. Like the rest of the tool, it previews by default.
 
 ## Metadata Pipeline
 

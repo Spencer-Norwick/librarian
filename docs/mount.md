@@ -71,6 +71,12 @@ The public repo intentionally does not ship separate adapters for Codex, Claude,
 
 Automation should prefer `librarian daily` and `librarian weekly` instead of stitching together lower-level commands.
 
+Reply handlers should prefer `librarian reply` instead of editing `index.md` directly:
+
+- `librarian reply skip --apply` marks the latest sent digest skipped.
+- `librarian reply read --apply` marks the latest sent digest read.
+- `librarian reply new --apply` marks the latest sent digest skipped and writes the next digest-ready draft.
+
 ## Local Model Hook Setup
 
 Agents should create a local hook only after the user chooses a provider or asks for model enrichment.

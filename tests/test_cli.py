@@ -534,6 +534,72 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("No digest-ready unread works found", output)
 
+    def test_reply_skip_dry_run_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(sent=today())
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                "# Sent Log\n\n"
+                f"- 2026-01-01T09:00:00 — `{entry.filename}` drafted as `draft.md`\n",
+                encoding="utf-8",
+            )
+            before_status_log = (root / "_state" / "status-log.md").read_text(encoding="utf-8")
+
+            code, output = self.run_cli(root, "reply", "skip")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] Latest digest: Never Sent: unread -> skipped", output)
+            self.assertIn("Dry run only", output)
+            self.assertEqual(read_index(root / "library" / "index.md")[0].status, "unread")
+            self.assertEqual((root / "_state" / "status-log.md").read_text(encoding="utf-8"), before_status_log)
+
+    def test_reply_read_apply_marks_latest_digest_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(sent=today())
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                "# Sent Log\n\n"
+                f"- 2026-01-01T09:00:00 — `{entry.filename}` drafted as `draft.md`\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(root, "reply", "read", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Latest digest: Never Sent: unread -> read", output)
+            self.assertIn("Updated Never Sent to read.", output)
+            self.assertEqual(read_index(root / "library" / "index.md")[0].status, "read")
+            self.assertIn("unread -> read", (root / "_state" / "status-log.md").read_text(encoding="utf-8"))
+
+    def test_reply_new_apply_skips_current_and_writes_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            current = self.ready_entry(title="Current Pick", filename="BAuthor_CurrentPick_2001_book.txt", sent=today())
+            replacement = self.ready_entry(author="A, Author", title="Next Pick", filename="AAuthor_NextPick_2002_book.txt")
+            (root / "library" / "index.md").write_text(render_index([current, replacement]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                "# Sent Log\n\n"
+                f"- 2026-01-01T09:00:00 — `{current.filename}` drafted as `draft.md`\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(root, "reply", "new", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Latest digest: Current Pick: unread -> skipped", output)
+            self.assertIn("Replacement digest pick: Next Pick by A, Author", output)
+            entries = {entry.title: entry for entry in read_index(root / "library" / "index.md")}
+            self.assertEqual(entries["Current Pick"].status, "skipped")
+            self.assertEqual(entries["Next Pick"].sent, today())
+            self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 1)
+            self.assertIn("unread -> skipped", (root / "_state" / "status-log.md").read_text(encoding="utf-8"))
+            self.assertIn("AAuthor_NextPick_2002_book.txt", (root / "_state" / "sent-log.md").read_text(encoding="utf-8"))
+
     def test_ingest_enrich_requires_model_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
