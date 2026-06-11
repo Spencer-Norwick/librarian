@@ -51,6 +51,9 @@ librarian reindex --apply
 librarian maintain
 librarian maintain --lookup
 librarian maintain --apply
+librarian digest
+librarian digest --notify
+librarian digest --email --apply
 librarian weekly-pick
 librarian weekly-pick --apply
 librarian list
@@ -68,6 +71,8 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 `ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
 
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
+
+`digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
 ## Metadata Pipeline
 
@@ -112,8 +117,17 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 - After `librarian init`, `index.md`, ingest logs, sent logs, and weekly draft state are edited only by commands run with `--apply`.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
-- No SQL, database, wiki, model call, or email sending is used in the MVP.
+- No SQL, database, wiki, or model call is used in the MVP.
+- Email is sent only when explicitly requested with `digest --email --apply` and configured through environment variables.
 - Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
+
+Email delivery uses Resend's HTTPS API without a required package dependency. Configure it with:
+
+```bash
+export RESEND_API_KEY="..."
+export LIBRARIAN_EMAIL_FROM="Reading Librarian <reads@example.com>"
+export LIBRARIAN_EMAIL_TO="you@example.com"
+```
 
 ## Scheduling Examples
 
@@ -124,7 +138,7 @@ The CLI does not install scheduled jobs automatically.
 ```cron
 0 8 * * * cd /path/to/reading-librarian && librarian ingest --apply
 0 9 * * 1 cd /path/to/reading-librarian && librarian lint
-0 10 * * 1 cd /path/to/reading-librarian && librarian weekly-pick --apply
+0 10 * * 1 cd /path/to/reading-librarian && librarian digest --apply
 ```
 
 ### macOS launchd
@@ -167,5 +181,5 @@ launchctl load ~/Library/LaunchAgents/local.reading-librarian.ingest.plist
 
 - No SQL or database is used.
 - No wiki or author-folder structure is created.
-- No real email is sent.
+- Real email is sent only by `digest --email --apply` with email environment variables configured.
 - Scanned or unreadable PDFs are marked for review instead of silently passing.

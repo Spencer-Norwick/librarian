@@ -97,6 +97,13 @@ class MaintenancePlan:
     renames: list[RenamePlan]
 
 
+@dataclass
+class DigestPlan:
+    entry: WorkEntry
+    draft_path: Path
+    body: str
+
+
 def project_config(root: Path) -> Config:
     config_path = root / "_state" / "config.toml"
     raw: dict = {}
@@ -195,7 +202,7 @@ Project rules for this reading librarian:
 - Keep the project simple.
 - Do not add a database.
 - Do not create a wiki.
-- Do not send email.
+- Do not send email unless the user explicitly invokes a configured email-sending command.
 - Do not delete files automatically.
 - Use dry-run by default for commands that modify files or Markdown.
 - Keep `library/index.md` clean, compact, stable, and readable.
@@ -269,6 +276,9 @@ librarian reindex --apply
 librarian maintain
 librarian maintain --lookup
 librarian maintain --apply
+librarian digest
+librarian digest --notify
+librarian digest --email --apply
 librarian weekly-pick
 librarian weekly-pick --apply
 librarian list
@@ -284,6 +294,8 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 `ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
 
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
+
+`digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
 ## Metadata Pipeline
 
@@ -328,8 +340,17 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 - After `librarian init`, `index.md`, ingest logs, sent logs, and weekly draft state are edited only by commands run with `--apply`.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
-- No SQL, database, wiki, model call, or email sending is used in the MVP.
+- No SQL, database, wiki, or model call is used in the MVP.
+- Email is sent only when explicitly requested with `digest --email --apply` and configured through environment variables.
 - Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
+
+Email delivery uses Resend's HTTPS API without a required package dependency. Configure it with:
+
+```bash
+export RESEND_API_KEY="..."
+export LIBRARIAN_EMAIL_FROM="Reading Librarian <reads@example.com>"
+export LIBRARIAN_EMAIL_TO="you@example.com"
+```
 
 ## Scheduling Examples
 
@@ -340,7 +361,7 @@ The CLI does not install scheduled jobs automatically.
 ```cron
 0 8 * * * cd /path/to/reading-librarian && librarian ingest --apply
 0 9 * * 1 cd /path/to/reading-librarian && librarian lint
-0 10 * * 1 cd /path/to/reading-librarian && librarian weekly-pick --apply
+0 10 * * 1 cd /path/to/reading-librarian && librarian digest --apply
 ```
 
 ### macOS launchd
@@ -383,7 +404,7 @@ launchctl load ~/Library/LaunchAgents/local.reading-librarian.ingest.plist
 
 - No SQL or database is used.
 - No wiki or author-folder structure is created.
-- No real email is sent.
+- Real email is sent only by `digest --email --apply` with email environment variables configured.
 - Scanned or unreadable PDFs are marked for review instead of silently passing.
 """
 
@@ -1575,43 +1596,66 @@ def filename_convention_ok(filename: str) -> bool:
 
 
 def command_weekly_pick(args: argparse.Namespace, root: Path) -> int:
+    return command_digest(args, root)
+
+
+def command_digest(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
     entries = read_index(config.index)
+    plan = build_digest_plan(config, entries, allow_repeats=args.allow_repeats)
+
+    if not plan:
+        print("No eligible unread works found.")
+        return 1
+
+    print(f"[dry-run] Digest pick: {plan.entry.display_title} by {plan.entry.author}")
+    print(f"[dry-run] Draft path: {plan.draft_path.relative_to(root)}")
+    if args.notify:
+        print(render_digest_notification(plan.entry, plan.draft_path))
+    if not args.apply:
+        print(plan.body)
+        print("Dry run only. Re-run with --apply to write the draft and sent log.")
+        if args.email:
+            print("Email not sent in dry-run mode.")
+        return 0
+
+    if args.email:
+        require_email_config()
+    write_text_without_overwrite(plan.draft_path, plan.body)
+    if args.email:
+        send_digest_email(plan.entry, plan.body)
+    plan.entry.sent = today()
+    entries = upsert_entry(entries, plan.entry)
+    write_index(config.index, entries)
+    append_sent_log(config.sent_log, plan.entry, plan.draft_path, emailed=args.email)
+    print(f"Wrote {plan.draft_path.relative_to(root)}.")
+    if args.email:
+        print("Sent digest email.")
+    return 0
+
+
+def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: bool = False) -> DigestPlan | None:
     candidates = [
         entry
         for entry in entries
         if entry.status not in {"read", "skipped"}
         and not entry_needs_review(entry)
-        and (args.allow_repeats or entry.sent == "never")
+        and (allow_repeats or entry.sent == "never")
     ]
-    if not candidates and args.allow_repeats:
+    if not candidates and allow_repeats:
         candidates = [entry for entry in entries if entry.status not in {"read", "skipped"} and not entry_needs_review(entry)]
     if not candidates:
-        print("No eligible unread works found.")
-        return 1
+        return None
 
     pick = sorted(candidates, key=lambda item: (item.sent != "never", item.author_key, item.display_title.lower()))[0]
     draft_name = f"{today()}_{normalize_filename(compact_pascal(pick.display_title) or 'Read')}.md"
     draft_path = unique_path(config.drafts / draft_name)
-    draft = weekly_draft(pick, config.library / pick.filename)
-    print(f"[dry-run] Weekly pick: {pick.display_title} by {pick.author}")
-    print(f"[dry-run] Draft path: {draft_path.relative_to(root)}")
-    if not args.apply:
-        print(draft)
-        print("Dry run only. Re-run with --apply to write the draft and sent log.")
-        return 0
-
-    write_text_without_overwrite(draft_path, draft)
-    pick.sent = today()
-    entries = upsert_entry(entries, pick)
-    write_index(config.index, entries)
-    append_sent_log(config.sent_log, pick, draft_path)
-    print(f"Wrote {draft_path.relative_to(root)}.")
-    return 0
+    draft = digest_draft(pick, config.library / pick.filename)
+    return DigestPlan(pick, draft_path, draft)
 
 
-def weekly_draft(entry: WorkEntry, local_path: Path) -> str:
+def digest_draft(entry: WorkEntry, local_path: Path) -> str:
     return f"""Subject: Read of the Week: {entry.display_title} by {entry.author}
 
 Title: {entry.display_title}
@@ -1633,10 +1677,58 @@ Local file path:
 """
 
 
-def append_sent_log(path: Path, entry: WorkEntry, draft_path: Path) -> None:
+def render_digest_notification(entry: WorkEntry, draft_path: Path) -> str:
+    return "\n".join(
+        [
+            f"NOTIFY: Read of the Week: {entry.display_title}",
+            f"Author: {entry.author}",
+            f"Draft: {draft_path}",
+        ]
+    )
+
+
+def send_digest_email(entry: WorkEntry, body: str) -> None:
+    api_key, sender, recipient = require_email_config()
+    payload = json.dumps(
+        {
+            "from": sender,
+            "to": [recipient],
+            "subject": f"Read of the Week: {entry.display_title} by {entry.author}",
+            "text": body,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "reading-librarian/0.1 (+local CLI)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if getattr(response, "status", 200) >= 400:
+                raise ValueError(f"Email delivery failed with HTTP {response.status}.")
+    except Exception as exc:
+        raise ValueError(f"Email delivery failed: {exc}") from exc
+
+
+def require_email_config() -> tuple[str, str, str]:
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    sender = os.environ.get("LIBRARIAN_EMAIL_FROM", "")
+    recipient = os.environ.get("LIBRARIAN_EMAIL_TO", "")
+    if not api_key or not sender or not recipient:
+        raise ValueError("Email delivery requires RESEND_API_KEY, LIBRARIAN_EMAIL_FROM, and LIBRARIAN_EMAIL_TO.")
+    return api_key, sender, recipient
+
+
+def append_sent_log(path: Path, entry: WorkEntry, draft_path: Path, emailed: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    delivery = "emailed and drafted as" if emailed else "drafted as"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"- {now_stamp()} — {inline_code(entry.filename)} drafted as {inline_code(draft_path.name)}\n")
+        handle.write(f"- {now_stamp()} — {inline_code(entry.filename)} {delivery} {inline_code(draft_path.name)}\n")
 
 
 def command_list(args: argparse.Namespace, root: Path) -> int:
@@ -1741,6 +1833,14 @@ def build_parser() -> argparse.ArgumentParser:
     weekly = sub.add_parser("weekly-pick")
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
+    weekly.add_argument("--notify", action="store_true")
+    weekly.add_argument("--email", action="store_true")
+
+    digest = sub.add_parser("digest")
+    digest.add_argument("--apply", action="store_true")
+    digest.add_argument("--allow-repeats", action="store_true")
+    digest.add_argument("--notify", action="store_true")
+    digest.add_argument("--email", action="store_true")
 
     sub.add_parser("list")
 
@@ -1774,6 +1874,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_maintain(args, root)
         if args.command == "weekly-pick":
             return command_weekly_pick(args, root)
+        if args.command == "digest":
+            return command_digest(args, root)
         if args.command == "list":
             return command_list(args, root)
         if args.command == "search":

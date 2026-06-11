@@ -5,7 +5,7 @@ Project rules for this reading librarian:
 - Keep the project simple.
 - Do not add a database.
 - Do not create a wiki.
-- Do not send email.
+- Do not send email unless the user explicitly invokes a configured email-sending command.
 - Do not delete files automatically.
 - Use dry-run by default for commands that modify files or Markdown.
 - Keep `library/index.md` clean, compact, stable, and readable.

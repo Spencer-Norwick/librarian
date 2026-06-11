@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -223,6 +224,66 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(existing.read_text(encoding="utf-8"), "existing draft")
             self.assertTrue((root / "_output" / "weekly-read-drafts" / f"{today()}_NeverSent_2.md").exists())
+
+    def test_digest_dry_run_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "digest")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Subject: Read of the Week", output)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
+
+    def test_digest_notify_prints_automation_friendly_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "digest", "--notify")
+
+            self.assertEqual(code, 0)
+            self.assertIn("NOTIFY: Read of the Week: Never Sent", output)
+
+    def test_digest_email_requires_config_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {}, clear=True):
+                code, output = self.run_cli(root, "digest", "--email", "--apply")
+
+            self.assertEqual(code, 2)
+            self.assertIn("Email delivery requires", output)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
+
+    def test_digest_email_apply_sends_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            env = {
+                "RESEND_API_KEY": "test-key",
+                "LIBRARIAN_EMAIL_FROM": "reads@example.com",
+                "LIBRARIAN_EMAIL_TO": "me@example.com",
+            }
+
+            with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = io.BytesIO(b'{"id":"email_123"}')
+                code, output = self.run_cli(root, "digest", "--email", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Sent digest email.", output)
+            self.assertTrue(urlopen.called)
+            self.assertIn("emailed and drafted as", (root / "_state" / "sent-log.md").read_text(encoding="utf-8"))
 
     def test_mark_read_requires_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
