@@ -41,6 +41,7 @@ class Config:
     state: Path
     ingest_log: Path
     sent_log: Path
+    status_log: Path
     quarantine: Path
     drafts: Path
     supported_extensions: set[str] = field(default_factory=lambda: set(SUPPORTED_EXTENSIONS))
@@ -102,6 +103,14 @@ class DigestPlan:
     entry: WorkEntry
     draft_path: Path
     body: str
+    history: "DigestHistory"
+
+
+@dataclass
+class DigestHistory:
+    sent_count: int = 0
+    last_sent: str = ""
+    skip_count: int = 0
 
 
 def project_config(root: Path) -> Config:
@@ -126,6 +135,7 @@ def project_config(root: Path) -> Config:
         state=state,
         ingest_log=p("ingest_log", "_state/ingest-log.md"),
         sent_log=p("sent_log", "_state/sent-log.md"),
+        status_log=p("status_log", "_state/status-log.md"),
         quarantine=p("quarantine", "_quarantine"),
         drafts=p("weekly_read_drafts", "_output/weekly-read-drafts"),
         supported_extensions={ext.lower() for ext in supported},
@@ -158,6 +168,7 @@ def init_project(root: Path) -> int:
     write_if_missing(config.state / "config.toml", sample_config())
     write_if_missing(config.ingest_log, "# Ingest Log\n\n")
     write_if_missing(config.sent_log, "# Sent Log\n\n")
+    write_if_missing(config.status_log, "# Status Log\n\n")
     write_if_missing(config.index, render_index([]))
     print("Initialized reading librarian workspace.")
     return 0
@@ -177,6 +188,7 @@ index = "library/index.md"
 state = "_state"
 ingest_log = "_state/ingest-log.md"
 sent_log = "_state/sent-log.md"
+status_log = "_state/status-log.md"
 quarantine = "_quarantine"
 weekly_read_drafts = "_output/weekly-read-drafts"
 
@@ -297,6 +309,8 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
+Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path.
+
 ## Metadata Pipeline
 
 The librarian uses the cheapest reliable step first:
@@ -337,7 +351,7 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 
 - New library files and weekly drafts are created with no-overwrite file operations.
 - Supported files in `inbox/` are moved only by `ingest --apply`.
-- After `librarian init`, `index.md`, ingest logs, sent logs, and weekly draft state are edited only by commands run with `--apply`.
+- After `librarian init`, `index.md`, ingest logs, sent/status logs, and weekly draft state are edited only by commands run with `--apply`.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
 - No SQL, database, wiki, or model call is used in the MVP.
@@ -1612,7 +1626,7 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     print(f"[dry-run] Digest pick: {plan.entry.display_title} by {plan.entry.author}")
     print(f"[dry-run] Draft path: {plan.draft_path.relative_to(root)}")
     if args.notify:
-        print(render_digest_notification(plan.entry, plan.draft_path))
+        print(render_digest_notification(plan.entry, plan.draft_path, plan.history))
     if not args.apply:
         print(plan.body)
         print("Dry run only. Re-run with --apply to write the draft and sent log.")
@@ -1649,13 +1663,14 @@ def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: b
         return None
 
     pick = sorted(candidates, key=lambda item: (item.sent != "never", item.author_key, item.display_title.lower()))[0]
+    history = digest_history(config, pick)
     draft_name = f"{today()}_{normalize_filename(compact_pascal(pick.display_title) or 'Read')}.md"
     draft_path = unique_path(config.drafts / draft_name)
-    draft = digest_draft(pick, config.library / pick.filename)
-    return DigestPlan(pick, draft_path, draft)
+    draft = digest_draft(pick, config.library / pick.filename, history)
+    return DigestPlan(pick, draft_path, draft, history)
 
 
-def digest_draft(entry: WorkEntry, local_path: Path) -> str:
+def digest_draft(entry: WorkEntry, local_path: Path, history: DigestHistory) -> str:
     return f"""Subject: Read of the Week: {entry.display_title} by {entry.author}
 
 Title: {entry.display_title}
@@ -1664,8 +1679,11 @@ Author: {entry.author}
 Summary:
 {entry.summary}
 
+Reading history:
+{human_digest_history(history)}
+
 Why this is worth reading now:
-This unread work is already in the local library and has not been sent before.
+{digest_rationale(history)}
 
 Primer prompts:
 - What problem is this work responding to?
@@ -1677,11 +1695,66 @@ Local file path:
 """
 
 
-def render_digest_notification(entry: WorkEntry, draft_path: Path) -> str:
+def digest_history(config: Config, entry: WorkEntry) -> DigestHistory:
+    sent_count = count_log_entries(config.sent_log, entry.filename)
+    skip_count = count_status_transitions(config.status_log, entry.filename, "skipped")
+    if entry.sent != "never" and sent_count == 0:
+        sent_count = 1
+    if entry.status == "skipped" and skip_count == 0:
+        skip_count = 1
+    return DigestHistory(sent_count=sent_count, last_sent="" if entry.sent == "never" else entry.sent, skip_count=skip_count)
+
+
+def count_log_entries(path: Path, filename: str) -> int:
+    if not path.exists() or not filename:
+        return 0
+    marker = inline_code(filename)
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if marker in line)
+
+
+def count_status_transitions(path: Path, filename: str, status: str) -> int:
+    if not path.exists() or not filename:
+        return 0
+    marker = inline_code(filename)
+    target = f"-> {status}"
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if marker in line and target in line)
+
+
+def human_digest_history(history: DigestHistory) -> str:
+    if history.sent_count == 0:
+        sent = "First time in the digest"
+    elif history.sent_count == 1:
+        sent = f"Sent once{last_sent_suffix(history)}"
+    else:
+        sent = f"Sent {history.sent_count} times{last_sent_suffix(history)}"
+
+    if history.skip_count == 0:
+        skipped = "never skipped"
+    elif history.skip_count == 1:
+        skipped = "skipped once"
+    else:
+        skipped = f"skipped {history.skip_count} times"
+    return f"{sent}; {skipped}."
+
+
+def last_sent_suffix(history: DigestHistory) -> str:
+    return f"; last sent {history.last_sent}" if history.last_sent else ""
+
+
+def digest_rationale(history: DigestHistory) -> str:
+    if history.sent_count == 0:
+        return "This unread work is already in the local library and has not been sent before."
+    return "This unread work is already in the local library and is being repeated intentionally."
+
+
+def render_digest_notification(entry: WorkEntry, draft_path: Path, history: DigestHistory) -> str:
     return "\n".join(
         [
             f"NOTIFY: Read of the Week: {entry.display_title}",
             f"Author: {entry.author}",
+            f"Summary: {entry.summary}",
+            f"History: {human_digest_history(history)}",
+            "Primer prompt: What problem is this work responding to?",
             f"Draft: {draft_path}",
         ]
     )
@@ -1766,14 +1839,22 @@ def command_mark(args: argparse.Namespace, root: Path, status: str) -> int:
             print(f"- {entry.display_title} `{entry.filename}`")
         return 1
     entry = matches[0]
+    old_status = entry.status
     print(f"[dry-run] {entry.display_title}: {entry.status} -> {status}")
     if not args.apply:
         print("Dry run only. Re-run with --apply to update index.md.")
         return 0
     entry.status = status
     write_index(config.index, entries)
+    append_status_log(config.status_log, entry, old_status, status)
     print(f"Updated {entry.display_title} to {status}.")
     return 0
+
+
+def append_status_log(path: Path, entry: WorkEntry, old_status: str, new_status: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"- {now_stamp()} — {inline_code(entry.filename)} {old_status} -> {new_status}\n")
 
 
 def match_entries(entries: list[WorkEntry], query: str) -> list[WorkEntry]:

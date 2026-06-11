@@ -236,6 +236,9 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("Subject: Read of the Week", output)
+            self.assertIn("Summary:\nReady.", output)
+            self.assertIn("Reading history:\nFirst time in the digest; never skipped.", output)
+            self.assertIn("Primer prompts:", output)
             self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
 
     def test_digest_notify_prints_automation_friendly_message(self) -> None:
@@ -249,6 +252,51 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("NOTIFY: Read of the Week: Never Sent", output)
+            self.assertIn("Summary: Ready.", output)
+            self.assertIn("History: First time in the digest; never skipped.", output)
+            self.assertIn("Primer prompt: What problem is this work responding to?", output)
+
+    def test_digest_history_counts_prior_sends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(
+                author="B, Author",
+                title="Already Sent",
+                filename="BAuthor_AlreadySent_2001_book.txt",
+                sent="2026-01-01",
+                summary="Ready.",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                "# Sent Log\n\n"
+                "- 2026-01-01T09:00:00 — `BAuthor_AlreadySent_2001_book.txt` drafted as `draft-1.md`\n"
+                "- 2026-01-08T09:00:00 — `BAuthor_AlreadySent_2001_book.txt` drafted as `draft-2.md`\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(root, "digest", "--allow-repeats")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Reading history:\nSent 2 times; last sent 2026-01-01; never skipped.", output)
+            self.assertIn("is being repeated intentionally", output)
+
+    def test_digest_history_counts_skips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = WorkEntry(author="B, Author", title="Never Sent", filename="BAuthor_NeverSent_2001_book.txt", sent="never", summary="Ready.")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "status-log.md").write_text(
+                "# Status Log\n\n"
+                "- 2026-01-01T09:00:00 — `BAuthor_NeverSent_2001_book.txt` unread -> skipped\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(root, "digest")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Reading history:\nFirst time in the digest; skipped once.", output)
 
     def test_digest_email_requires_config_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,6 +347,7 @@ class LibrarianCliTests(unittest.TestCase):
             code, _ = self.run_cli(root, "mark-read", "Orality", "--apply")
             self.assertEqual(code, 0)
             self.assertIn("Status: read", (root / "library" / "index.md").read_text(encoding="utf-8"))
+            self.assertIn("unread -> read", (root / "_state" / "status-log.md").read_text(encoding="utf-8"))
 
     def test_lint_finds_missing_index_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

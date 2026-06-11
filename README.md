@@ -74,6 +74,8 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
+Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path.
+
 ## Metadata Pipeline
 
 The librarian uses the cheapest reliable step first:
@@ -114,7 +116,7 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 
 - New library files and weekly drafts are created with no-overwrite file operations.
 - Supported files in `inbox/` are moved only by `ingest --apply`.
-- After `librarian init`, `index.md`, ingest logs, sent logs, and weekly draft state are edited only by commands run with `--apply`.
+- After `librarian init`, `index.md`, ingest logs, sent/status logs, and weekly draft state are edited only by commands run with `--apply`.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
 - No SQL, database, wiki, or model call is used in the MVP.
