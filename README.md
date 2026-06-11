@@ -171,6 +171,8 @@ The command may be a shell script, Python script, local binary, or model CLI wra
 
 If the command calls an external model provider, it may send selected work metadata and a text excerpt outside the user's machine. Keep dry-run review as the default, and do not use external enrichment for private or sensitive files unless that tradeoff is deliberate.
 
+For public forks, provider-specific hooks should be created in ignored local state such as `_state/model-enrich-local`, then configured through `_state/config.toml` or `LIBRARIAN_MODEL_COMMAND`. See `docs/mount.md` for the agent setup protocol and synthetic hook test.
+
 ## Filename Convention
 
 ```text

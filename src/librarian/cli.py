@@ -277,6 +277,9 @@ Mount protocol for new users or forks:
 - Write local config only with `librarian mount --apply`.
 - Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
 - Prefer `privacy=assisted`, `digest=notify`, and explicit user approval before sending text excerpts to an external model.
+- If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
+- The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
+- Test model hooks with synthetic non-library text before asking to enrich real files.
 - See `docs/mount.md` for the full human and agent runbook.
 """
 
@@ -426,6 +429,14 @@ The command receives JSON on stdin with the work metadata, instructions, and a t
 ```
 
 The CLI rejects incomplete enrichment output. A usable enrichment needs a specific summary and at least two primer prompts.
+
+### Provider Hooks
+
+The public project does not ship provider-specific model adapters. Keep model use behind the `model_command` contract so a Codex, Claude, OpenAI, Ollama, or local-model user can provide the command that fits their environment.
+
+The command may be a shell script, Python script, local binary, or model CLI wrapper. It must read the librarian JSON payload from stdin and print the enrichment JSON schema above to stdout.
+
+For public forks, provider-specific hooks should be created in ignored local state such as `_state/model-enrich-local`, then configured through `_state/config.toml` or `LIBRARIAN_MODEL_COMMAND`. See `docs/mount.md` for the agent setup protocol and synthetic hook test.
 
 ## Filename Convention
 
@@ -1637,6 +1648,7 @@ def command_mount(args: argparse.Namespace, root: Path) -> int:
         print(f"{status} {label}: {detail}")
     print(f"Recommended model command: {shell_join(recommendation.model_command) if recommendation.model_command else 'none'}")
     print(f"Model note: {recommendation.model_note}")
+    print("Model hook setup: create provider-specific hooks in ignored local state such as _state/model-enrich-local.")
     print(f"Recommended digest command: {recommendation.digest_command}")
 
     if args.check:

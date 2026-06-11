@@ -17,6 +17,8 @@ When an agent is asked to set up this project for a new user:
 
 Do not ingest files, enrich entries, create automations, or send email during mount unless the user explicitly asks for that separate action.
 
+If model enrichment is desired, set up a provider-specific local hook after mount. Keep that hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
+
 ## User Choices
 
 Privacy mode:
@@ -68,6 +70,52 @@ librarian mount --privacy assisted --model custom --model-command "claude enrich
 The public repo intentionally does not ship separate adapters for Codex, Claude, OpenAI, Ollama, or other providers. A user's configured `model_command` is the provider-specific layer.
 
 Automation should prefer `librarian daily` and `librarian weekly` instead of stitching together lower-level commands.
+
+## Local Model Hook Setup
+
+Agents should create a local hook only after the user chooses a provider or asks for model enrichment.
+
+The hook may be a shell script, Python script, local binary, or model CLI wrapper. It must:
+
+- read JSON from stdin
+- send only the needed metadata and text excerpt to the chosen model
+- print only valid enrichment JSON to stdout
+- keep provider credentials and implementation details out of the public repo
+
+Recommended local path:
+
+```text
+_state/model-enrich-local
+```
+
+Configure it with:
+
+```toml
+[behavior]
+use_model_assistance = false
+model_command = ["_state/model-enrich-local"]
+model_max_input_chars = 12000
+```
+
+Before using real library files, test the hook with synthetic text:
+
+```bash
+printf '%s' '{"work":{"title":"Synthetic Test","author":"Example, Ada","year":"2026","work_type":"essay"},"text_excerpt":"This synthetic essay says reading systems should reduce friction while preserving judgment and privacy."}' \
+  | _state/model-enrich-local
+```
+
+Expected output shape:
+
+```json
+{
+  "summary": "A concise, specific summary.",
+  "primer_prompts": ["A specific question.", "Another specific question."],
+  "tags": ["reading"],
+  "related": "None."
+}
+```
+
+After the synthetic test passes, ask the user for explicit approval before sending excerpts from real library files to any external model provider.
 
 ## Safety
 

@@ -69,6 +69,7 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Mount check", output)
             self.assertIn("Recommended digest command:", output)
+            self.assertIn("_state/model-enrich-local", output)
             self.assertEqual(config_path.read_text(encoding="utf-8"), before)
 
     def test_mount_dry_run_prints_config_without_writing(self) -> None:

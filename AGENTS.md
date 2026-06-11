@@ -30,4 +30,7 @@ Mount protocol for new users or forks:
 - Write local config only with `librarian mount --apply`.
 - Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
 - Prefer `privacy=assisted`, `digest=notify`, and explicit user approval before sending text excerpts to an external model.
+- If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
+- The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
+- Test model hooks with synthetic non-library text before asking to enrich real files.
 - See `docs/mount.md` for the full human and agent runbook.
