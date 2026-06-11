@@ -57,6 +57,71 @@ class LibrarianCliTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "inbox").is_dir())
         self.assertTrue((FIXTURES / "library").is_dir())
 
+    def test_mount_check_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config_path = root / "_state" / "config.toml"
+            before = config_path.read_text(encoding="utf-8")
+
+            code, output = self.run_cli(root, "mount", "--check")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Mount check", output)
+            self.assertIn("Recommended digest command:", output)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), before)
+
+    def test_mount_dry_run_prints_config_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config_path = root / "_state" / "config.toml"
+            before = config_path.read_text(encoding="utf-8")
+
+            code, output = self.run_cli(root, "mount", "--model", "none")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] Mount config target:", output)
+            self.assertIn("model_command = []", output)
+            self.assertIn("Dry run only", output)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), before)
+
+    def test_mount_apply_writes_custom_model_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+
+            code, output = self.run_cli(
+                root,
+                "mount",
+                "--apply",
+                "--privacy",
+                "automatic",
+                "--model",
+                "custom",
+                "--model-command",
+                "claude enrich-json",
+                "--digest",
+                "apply",
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied mount config.", output)
+            config_text = (root / "_state" / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('model_command = ["claude", "enrich-json"]', config_text)
+            self.assertIn("use_model_assistance = true", config_text)
+            self.assertIn("Recommended digest command: librarian digest --notify --apply", output)
+
+    def test_mount_custom_model_requires_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+
+            code, output = self.run_cli(root, "mount", "--model", "custom")
+
+            self.assertEqual(code, 2)
+            self.assertIn("--model custom requires --model-command", output)
+
     def test_inbox_pdf_can_be_seen_in_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

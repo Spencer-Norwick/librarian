@@ -40,6 +40,9 @@ Test/sample files live under `tests/fixtures/`. Do not put test inboxes or test 
 
 ```bash
 librarian init
+librarian mount --check
+librarian mount
+librarian mount --apply
 librarian ingest
 librarian ingest --lookup
 librarian ingest --enrich --apply
@@ -68,6 +71,10 @@ librarian skip "Title or filename" --apply
 ```
 
 Commands that modify files or Markdown are dry-run by default. Use `--apply` to write changes.
+
+`mount` is the onboarding workflow for a new user or fork. It checks the local environment, detects available model CLIs, recommends a provider-neutral `model_command`, and previews `_state/config.toml` changes. `mount --check` is read-only. `mount --apply` writes local ignored config only.
+
+See `docs/mount.md` for the human and agent setup runbook.
 
 `lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
 

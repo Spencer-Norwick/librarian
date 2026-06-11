@@ -22,3 +22,12 @@ Project rules for this reading librarian:
 - Reserve planned ingest filenames before moving files so same-batch collisions cannot overwrite.
 - Ignore symlinked inbox files unless there is a deliberate, reviewed reason to support them.
 - Keep `index.md` in the established heading and field format; update parser/lint tests when the format changes.
+
+Mount protocol for new users or forks:
+
+- Start with `librarian mount --check`.
+- Treat `librarian mount` as dry-run setup preview.
+- Write local config only with `librarian mount --apply`.
+- Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
+- Prefer `privacy=assisted`, `digest=notify`, and explicit user approval before sending text excerpts to an external model.
+- See `docs/mount.md` for the full human and agent runbook.

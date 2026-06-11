@@ -127,6 +127,14 @@ class ModelEnrichment:
     related: str = ""
 
 
+@dataclass
+class MountRecommendation:
+    model_command: list[str]
+    model_note: str
+    digest_command: str
+    checks: list[tuple[str, str, str]]
+
+
 def project_config(root: Path) -> Config:
     config_path = root / "_state" / "config.toml"
     raw: dict = {}
@@ -261,6 +269,15 @@ Project rules for this reading librarian:
 - Reserve planned ingest filenames before moving files so same-batch collisions cannot overwrite.
 - Ignore symlinked inbox files unless there is a deliberate, reviewed reason to support them.
 - Keep `index.md` in the established heading and field format; update parser/lint tests when the format changes.
+
+Mount protocol for new users or forks:
+
+- Start with `librarian mount --check`.
+- Treat `librarian mount` as dry-run setup preview.
+- Write local config only with `librarian mount --apply`.
+- Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
+- Prefer `privacy=assisted`, `digest=notify`, and explicit user approval before sending text excerpts to an external model.
+- See `docs/mount.md` for the full human and agent runbook.
 """
 
 
@@ -307,6 +324,9 @@ Test/sample files live under `tests/fixtures/`. Do not put test inboxes or test 
 
 ```bash
 librarian init
+librarian mount --check
+librarian mount
+librarian mount --apply
 librarian ingest
 librarian ingest --lookup
 librarian ingest --enrich --apply
@@ -335,6 +355,10 @@ librarian skip "Title or filename" --apply
 ```
 
 Commands that modify files or Markdown are dry-run by default. Use `--apply` to write changes.
+
+`mount` is the onboarding workflow for a new user or fork. It checks the local environment, detects available model CLIs, recommends a provider-neutral `model_command`, and previews `_state/config.toml` changes. `mount --check` is read-only. `mount --apply` writes local ignored config only.
+
+See `docs/mount.md` for the human and agent setup runbook.
 
 `lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
 
@@ -1595,6 +1619,150 @@ def command_lint(args: argparse.Namespace, root: Path) -> int:
     return 1 if errors else 0
 
 
+def command_mount(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    recommendation = build_mount_recommendation(root, args)
+
+    print("Mount check")
+    for status, label, detail in recommendation.checks:
+        print(f"{status} {label}: {detail}")
+    print(f"Recommended model command: {shell_join(recommendation.model_command) if recommendation.model_command else 'none'}")
+    print(f"Model note: {recommendation.model_note}")
+    print(f"Recommended digest command: {recommendation.digest_command}")
+
+    if args.check:
+        return 0
+
+    raw = read_config_raw(root)
+    mounted = mounted_config(raw, args, recommendation.model_command)
+    rendered = render_config_toml(mounted)
+    print(f"[dry-run] Mount config target: {config.state.relative_to(root)}/config.toml")
+    print(rendered.rstrip())
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to write _state/config.toml.")
+        return 0
+
+    write_text_atomic(config.state / "config.toml", rendered)
+    print("Applied mount config.")
+    return 0
+
+
+def build_mount_recommendation(root: Path, args: argparse.Namespace) -> MountRecommendation:
+    python = project_python(root)
+    checks: list[tuple[str, str, str]] = []
+    checks.append(("OK", "project_root", str(root)))
+    checks.append(("OK" if (root / ".git").exists() else "WARN", "git", "Git repo found." if (root / ".git").exists() else "No .git directory found."))
+    checks.append(("OK" if Path(python).exists() or shutil.which(python) else "WARN", "python", python))
+    checks.append(("OK" if python_has_module(python, "pypdf") else "WARN", "pdf_parser", "pypdf available" if python_has_module(python, "pypdf") else "Install optional dependency with `python -m pip install -e '.[pdf]'`."))
+
+    detected = detected_model_commands()
+    for name, path in detected.items():
+        checks.append(("OK", f"model_cli_{name}", path))
+    if not detected:
+        checks.append(("WARN", "model_cli", "No supported model CLI found in PATH."))
+
+    model_command_value, note = recommended_mount_model_command(root, args, detected)
+    digest_command = recommended_digest_command(root, args.digest)
+    return MountRecommendation(model_command=model_command_value, model_note=note, digest_command=digest_command, checks=checks)
+
+
+def project_python(root: Path) -> str:
+    venv_python = root / ".venv" / "bin" / "python"
+    return str(venv_python.relative_to(root)) if venv_python.exists() else "python3"
+
+
+def python_has_module(python: str, module: str) -> bool:
+    try:
+        completed = subprocess.run([python, "-c", f"import {module}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def detected_model_commands() -> dict[str, str]:
+    names = ["codex", "claude", "openai", "ollama"]
+    detected: dict[str, str] = {}
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            detected[name] = path
+    bundled_codex = Path("/Applications/Codex.app/Contents/Resources/codex")
+    if "codex" not in detected and bundled_codex.exists():
+        detected["codex"] = str(bundled_codex)
+    return detected
+
+
+def recommended_mount_model_command(root: Path, args: argparse.Namespace, detected: dict[str, str]) -> tuple[list[str], str]:
+    if args.model_command:
+        return shlex.split(args.model_command), "Using explicit --model-command."
+    if args.model == "none" or args.privacy == "local":
+        return [], "Model enrichment disabled."
+    if args.model == "custom":
+        raise ValueError("--model custom requires --model-command.")
+    if args.model in {"auto", "codex"} and "codex" in detected and (root / "scripts" / "enrich_with_codex.py").exists():
+        return [project_python(root), "scripts/enrich_with_codex.py"], "Codex CLI detected; using the repo's JSON adapter."
+    if args.model == "codex":
+        raise ValueError("Codex was requested, but no Codex CLI plus scripts/enrich_with_codex.py adapter was found.")
+    return [], "No JSON-compatible model command was auto-configured. Use --model-command for Claude, OpenAI, Ollama, or another provider."
+
+
+def recommended_digest_command(root: Path, mode: str) -> str:
+    librarian = ".venv/bin/librarian" if (root / ".venv" / "bin" / "librarian").exists() else "librarian"
+    commands = {
+        "none": "none",
+        "notify": f"{librarian} digest --notify",
+        "apply": f"{librarian} digest --notify --apply",
+        "email": f"{librarian} digest --email --apply",
+    }
+    return commands[mode]
+
+
+def read_config_raw(root: Path) -> dict:
+    path = root / "_state" / "config.toml"
+    if not path.exists():
+        return {}
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def mounted_config(raw: dict, args: argparse.Namespace, recommended_model_command: list[str]) -> dict:
+    paths = dict(raw.get("paths", {}))
+    behavior = dict(raw.get("behavior", {}))
+    defaults = tomllib.loads(sample_config())
+    merged = {
+        "paths": {**defaults.get("paths", {}), **paths},
+        "behavior": {**defaults.get("behavior", {}), **behavior},
+    }
+    merged["behavior"]["model_command"] = recommended_model_command
+    merged["behavior"]["use_model_assistance"] = args.privacy == "automatic" and bool(recommended_model_command)
+    merged["behavior"]["use_catalog_lookup"] = bool(behavior.get("use_catalog_lookup", False))
+    return merged
+
+
+def render_config_toml(raw: dict) -> str:
+    lines: list[str] = []
+    for section in ["paths", "behavior"]:
+        lines.append(f"[{section}]")
+        for key, value in raw.get(section, {}).items():
+            lines.append(f"{key} = {toml_literal(value)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def toml_literal(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_literal(item) for item in value) + "]"
+    return json.dumps(str(value))
+
+
+def shell_join(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
+
+
 def command_reindex(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
@@ -2185,6 +2353,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init")
 
+    mount = sub.add_parser("mount")
+    mount.add_argument("--check", action="store_true", help="Inspect mount readiness without printing or writing config changes.")
+    mount.add_argument("--apply", action="store_true")
+    mount.add_argument("--privacy", choices=["local", "assisted", "automatic"], default="assisted")
+    mount.add_argument("--model", choices=["auto", "none", "codex", "custom"], default="auto")
+    mount.add_argument("--model-command", help="Explicit JSON enrichment command. Receives JSON on stdin and prints JSON on stdout.")
+    mount.add_argument("--digest", choices=["none", "notify", "apply", "email"], default="notify")
+
     ingest = sub.add_parser("ingest")
     ingest.add_argument("--apply", action="store_true")
     ingest.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
@@ -2241,6 +2417,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
     try:
         if args.command == "init":
             return init_project(root)
+        if args.command == "mount":
+            return command_mount(args, root)
         if args.command == "ingest":
             return command_ingest(args, root)
         if args.command == "lint":
