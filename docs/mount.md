@@ -27,8 +27,8 @@ Privacy mode:
 
 Model mode:
 
-- `auto`: use the best detected JSON-compatible model command.
-- `codex`: use `scripts/enrich_with_codex.py` if Codex CLI is available.
+- `auto`: detect model CLIs and report them, but do not choose a provider-specific command.
+- `codex`: verify Codex CLI exists; still requires a JSON-compatible `--model-command`.
 - `custom`: use the command provided with `--model-command`.
 - `none`: disable model enrichment.
 
@@ -53,10 +53,10 @@ Preview a local-only config:
 librarian mount --privacy local --model none
 ```
 
-Write a Codex-assisted config:
+Preview a detected-provider setup without selecting a model command:
 
 ```bash
-librarian mount --privacy assisted --model codex --apply
+librarian mount --privacy assisted --model auto
 ```
 
 Write a custom model command:
@@ -64,6 +64,8 @@ Write a custom model command:
 ```bash
 librarian mount --privacy assisted --model custom --model-command "claude enrich-json" --apply
 ```
+
+The public repo intentionally does not ship separate adapters for Codex, Claude, OpenAI, Ollama, or other providers. A user's configured `model_command` is the provider-specific layer.
 
 ## Safety
 

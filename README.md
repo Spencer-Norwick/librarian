@@ -137,29 +137,31 @@ The command receives JSON on stdin with the work metadata, instructions, and a t
 
 The CLI rejects incomplete enrichment output. A usable enrichment needs a specific summary and at least two primer prompts.
 
-### Codex Adapter
+### Provider Hooks
 
-This repo includes a Codex CLI adapter for local use:
+The public project does not ship provider-specific model adapters. Keep model use behind the `model_command` contract so a Codex, Claude, OpenAI, Ollama, or local-model user can provide the command that fits their environment.
 
 ```toml
 [behavior]
-model_command = ["python3", "scripts/enrich_with_codex.py"]
+model_command = ["path/to/json-enrichment-command"]
 model_max_input_chars = 12000
 ```
 
 Or for a one-off command:
 
 ```bash
-LIBRARIAN_MODEL_COMMAND="python3 scripts/enrich_with_codex.py" librarian enrich "Title or filename"
+LIBRARIAN_MODEL_COMMAND="path/to/json-enrichment-command" librarian enrich "Title or filename"
 ```
 
 Use `--apply` only after reviewing the dry-run output:
 
 ```bash
-LIBRARIAN_MODEL_COMMAND="python3 scripts/enrich_with_codex.py" librarian enrich "Title or filename" --apply
+LIBRARIAN_MODEL_COMMAND="path/to/json-enrichment-command" librarian enrich "Title or filename" --apply
 ```
 
-This sends the selected work metadata and a text excerpt to Codex/OpenAI through the local Codex CLI. Keep dry-run review as the default, and do not use this adapter for private or sensitive files unless that tradeoff is deliberate.
+The command may be a shell script, Python script, local binary, or model CLI wrapper. It must read the librarian JSON payload from stdin and print the enrichment JSON schema above to stdout.
+
+If the command calls an external model provider, it may send selected work metadata and a text excerpt outside the user's machine. Keep dry-run review as the default, and do not use external enrichment for private or sensitive files unless that tradeoff is deliberate.
 
 ## Filename Convention
 

@@ -1700,11 +1700,14 @@ def recommended_mount_model_command(root: Path, args: argparse.Namespace, detect
         return [], "Model enrichment disabled."
     if args.model == "custom":
         raise ValueError("--model custom requires --model-command.")
-    if args.model in {"auto", "codex"} and "codex" in detected and (root / "scripts" / "enrich_with_codex.py").exists():
-        return [project_python(root), "scripts/enrich_with_codex.py"], "Codex CLI detected; using the repo's JSON adapter."
     if args.model == "codex":
-        raise ValueError("Codex was requested, but no Codex CLI plus scripts/enrich_with_codex.py adapter was found.")
-    return [], "No JSON-compatible model command was auto-configured. Use --model-command for Claude, OpenAI, Ollama, or another provider."
+        if "codex" in detected:
+            return [], "Codex CLI detected, but no model command was configured. Provide --model-command with a JSON-compatible Codex wrapper."
+        raise ValueError("Codex was requested, but no Codex CLI was found.")
+    if detected:
+        names = ", ".join(sorted(detected))
+        return [], f"Detected model CLI(s): {names}. Provide --model-command for the provider-specific JSON hook you want to use."
+    return [], "No model CLI found. Provide --model-command later or use --model none."
 
 
 def recommended_digest_command(root: Path, mode: str) -> str:

@@ -122,6 +122,19 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("--model custom requires --model-command", output)
 
+    def test_mount_codex_does_not_autoconfigure_provider_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+
+            code, output = self.run_cli(root, "mount", "--model", "codex")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Recommended model command: none", output)
+            self.assertIn("no model command was configured", output)
+            self.assertIn("JSON-compatible Codex wrapper", output)
+            self.assertIn("model_command = []", output)
+
     def test_inbox_pdf_can_be_seen_in_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
