@@ -110,7 +110,7 @@ class LibrarianCliTests(unittest.TestCase):
             config_text = (root / "_state" / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model_command = ["claude", "enrich-json"]', config_text)
             self.assertIn("use_model_assistance = true", config_text)
-            self.assertIn("Recommended digest command: librarian digest --notify --apply", output)
+            self.assertIn("Recommended digest command: librarian weekly --apply", output)
 
     def test_mount_custom_model_requires_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,6 +182,37 @@ class LibrarianCliTests(unittest.TestCase):
             log_text = (root / "_state" / "ingest-log.md").read_text(encoding="utf-8")
             self.assertIn("`Ong_Walter_OralityAndLiteracy_1982_book.txt`", log_text)
             self.assertIn("`OngWalter_OralityAndLiteracy_1982_book.txt`", log_text)
+
+    def test_daily_dry_run_does_not_move_inbox_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "Ong_Walter_OralityAndLiteracy_1982_book.txt"
+            source.write_text("Writing restructures consciousness.", encoding="utf-8")
+
+            code, output = self.run_cli(root, "daily")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Daily workflow: ingest", output)
+            self.assertIn("Daily workflow: maintain", output)
+            self.assertIn("Daily workflow: lint", output)
+            self.assertTrue(source.exists())
+            self.assertEqual(read_index(root / "library" / "index.md"), [])
+
+    def test_daily_apply_ingests_and_lints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "Ong_Walter_OralityAndLiteracy_1982_book.txt"
+            source.write_text("Writing restructures consciousness.", encoding="utf-8")
+
+            code, output = self.run_cli(root, "daily", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied ingest for 1 file", output)
+            self.assertIn("No lint issues found.", output)
+            self.assertFalse(source.exists())
+            self.assertTrue((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
 
     def test_collision_gets_stable_hash_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -361,6 +392,36 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertIn("Summary: A specific summary that is ready for a weekly digest.", output)
             self.assertIn("History: First time in the digest; never skipped.", output)
             self.assertIn("Primer prompt: What question does this work open?", output)
+
+    def test_weekly_defaults_to_notify_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "weekly")
+
+            self.assertEqual(code, 0)
+            self.assertIn("NOTIFY: Read of the Week: Never Sent", output)
+            self.assertIn("Dry run only", output)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
+
+    def test_weekly_apply_writes_digest_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "weekly", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("NOTIFY: Read of the Week: Never Sent", output)
+            self.assertIn("Wrote _output/weekly-read-drafts", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].sent, today())
+            self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 1)
 
     def test_digest_history_counts_prior_sends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

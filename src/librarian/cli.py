@@ -327,6 +327,10 @@ librarian init
 librarian mount --check
 librarian mount
 librarian mount --apply
+librarian daily
+librarian daily --apply
+librarian weekly
+librarian weekly --apply
 librarian ingest
 librarian ingest --lookup
 librarian ingest --enrich --apply
@@ -359,6 +363,10 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 `mount` is the onboarding workflow for a new user or fork. It checks the local environment, detects available model CLIs, recommends a provider-neutral `model_command`, and previews `_state/config.toml` changes. `mount --check` is read-only. `mount --apply` writes local ignored config only.
 
 See `docs/mount.md` for the human and agent setup runbook.
+
+`daily` is the automation-friendly daily workflow. It runs ingest, maintain, and lint in order. It is dry-run by default; use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` only when those configured capabilities should run.
+
+`weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 
 `lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
 
@@ -463,14 +471,14 @@ The CLI does not install scheduled jobs automatically.
 ### cron
 
 ```cron
-0 8 * * * cd /path/to/reading-librarian && librarian ingest --apply
+0 8 * * * cd /path/to/reading-librarian && librarian daily --apply
 0 9 * * 1 cd /path/to/reading-librarian && librarian lint
-0 10 * * 1 cd /path/to/reading-librarian && librarian digest --apply
+0 10 * * 1 cd /path/to/reading-librarian && librarian weekly --apply
 ```
 
 ### macOS launchd
 
-Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
+Create `~/Library/LaunchAgents/local.reading-librarian.daily.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -478,11 +486,11 @@ Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>local.reading-librarian.ingest</string>
+  <string>local.reading-librarian.daily</string>
   <key>ProgramArguments</key>
   <array>
     <string>/path/to/venv/bin/librarian</string>
-    <string>ingest</string>
+    <string>daily</string>
     <string>--apply</string>
   </array>
   <key>WorkingDirectory</key>
@@ -501,7 +509,7 @@ Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
 Load it manually when ready:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/local.reading-librarian.ingest.plist
+launchctl load ~/Library/LaunchAgents/local.reading-librarian.daily.plist
 ```
 
 ## Notes
@@ -1714,9 +1722,9 @@ def recommended_digest_command(root: Path, mode: str) -> str:
     librarian = ".venv/bin/librarian" if (root / ".venv" / "bin" / "librarian").exists() else "librarian"
     commands = {
         "none": "none",
-        "notify": f"{librarian} digest --notify",
-        "apply": f"{librarian} digest --notify --apply",
-        "email": f"{librarian} digest --email --apply",
+        "notify": f"{librarian} weekly",
+        "apply": f"{librarian} weekly --apply",
+        "email": f"{librarian} weekly --email --apply",
     }
     return commands[mode]
 
@@ -1833,6 +1841,39 @@ def command_maintain(args: argparse.Namespace, root: Path) -> int:
     write_index(config.index, plan.entries)
     print(f"Applied maintenance: {len(plan.renames)} rename(s), {len(plan.entries)} indexed file(s).")
     return 0
+
+
+def command_daily(args: argparse.Namespace, root: Path) -> int:
+    print("Daily workflow: ingest")
+    ingest_code = command_ingest(
+        argparse.Namespace(apply=args.apply, lookup=args.lookup, enrich=args.enrich),
+        root,
+    )
+    if ingest_code:
+        return ingest_code
+
+    print("Daily workflow: maintain")
+    maintain_code = command_maintain(
+        argparse.Namespace(apply=args.apply, lookup=args.lookup, enrich=args.enrich),
+        root,
+    )
+    if maintain_code:
+        return maintain_code
+
+    print("Daily workflow: lint")
+    return command_lint(argparse.Namespace(apply=False), root)
+
+
+def command_weekly(args: argparse.Namespace, root: Path) -> int:
+    return command_digest(
+        argparse.Namespace(
+            apply=args.apply,
+            allow_repeats=args.allow_repeats,
+            notify=not args.no_notify,
+            email=args.email,
+        ),
+        root,
+    )
 
 
 def build_maintenance_plan(config: Config, use_catalog_lookup: bool = False, use_model_enrichment: bool = False) -> MaintenancePlan:
@@ -2382,6 +2423,17 @@ def build_parser() -> argparse.ArgumentParser:
     maintain.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     maintain.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
+    daily = sub.add_parser("daily")
+    daily.add_argument("--apply", action="store_true")
+    daily.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
+    daily.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
+
+    weekly = sub.add_parser("weekly")
+    weekly.add_argument("--apply", action="store_true")
+    weekly.add_argument("--allow-repeats", action="store_true")
+    weekly.add_argument("--no-notify", action="store_true")
+    weekly.add_argument("--email", action="store_true")
+
     enrich = sub.add_parser("enrich")
     enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
     enrich.add_argument("--apply", action="store_true")
@@ -2430,6 +2482,10 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_reindex(args, root)
         if args.command == "maintain":
             return command_maintain(args, root)
+        if args.command == "daily":
+            return command_daily(args, root)
+        if args.command == "weekly":
+            return command_weekly(args, root)
         if args.command == "weekly-pick":
             return command_weekly_pick(args, root)
         if args.command == "digest":

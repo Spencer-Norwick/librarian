@@ -35,9 +35,9 @@ Model mode:
 Digest mode:
 
 - `none`: do not recommend a digest command.
-- `notify`: preview digest notification with no writes.
-- `apply`: write digest draft and sent state.
-- `email`: send email only if environment variables are configured.
+- `notify`: preview weekly digest notification with no writes.
+- `apply`: write weekly digest draft and sent state.
+- `email`: send weekly digest email only if environment variables are configured.
 
 ## Examples
 
@@ -66,6 +66,8 @@ librarian mount --privacy assisted --model custom --model-command "claude enrich
 ```
 
 The public repo intentionally does not ship separate adapters for Codex, Claude, OpenAI, Ollama, or other providers. A user's configured `model_command` is the provider-specific layer.
+
+Automation should prefer `librarian daily` and `librarian weekly` instead of stitching together lower-level commands.
 
 ## Safety
 

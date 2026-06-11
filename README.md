@@ -43,6 +43,10 @@ librarian init
 librarian mount --check
 librarian mount
 librarian mount --apply
+librarian daily
+librarian daily --apply
+librarian weekly
+librarian weekly --apply
 librarian ingest
 librarian ingest --lookup
 librarian ingest --enrich --apply
@@ -75,6 +79,10 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 `mount` is the onboarding workflow for a new user or fork. It checks the local environment, detects available model CLIs, recommends a provider-neutral `model_command`, and previews `_state/config.toml` changes. `mount --check` is read-only. `mount --apply` writes local ignored config only.
 
 See `docs/mount.md` for the human and agent setup runbook.
+
+`daily` is the automation-friendly daily workflow. It runs ingest, maintain, and lint in order. It is dry-run by default; use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` only when those configured capabilities should run.
+
+`weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 
 `lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
 
@@ -207,14 +215,14 @@ The CLI does not install scheduled jobs automatically.
 ### cron
 
 ```cron
-0 8 * * * cd /path/to/reading-librarian && librarian ingest --apply
+0 8 * * * cd /path/to/reading-librarian && librarian daily --apply
 0 9 * * 1 cd /path/to/reading-librarian && librarian lint
-0 10 * * 1 cd /path/to/reading-librarian && librarian digest --apply
+0 10 * * 1 cd /path/to/reading-librarian && librarian weekly --apply
 ```
 
 ### macOS launchd
 
-Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
+Create `~/Library/LaunchAgents/local.reading-librarian.daily.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -222,11 +230,11 @@ Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>local.reading-librarian.ingest</string>
+  <string>local.reading-librarian.daily</string>
   <key>ProgramArguments</key>
   <array>
     <string>/path/to/venv/bin/librarian</string>
-    <string>ingest</string>
+    <string>daily</string>
     <string>--apply</string>
   </array>
   <key>WorkingDirectory</key>
@@ -245,7 +253,7 @@ Create `~/Library/LaunchAgents/local.reading-librarian.ingest.plist`:
 Load it manually when ready:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/local.reading-librarian.ingest.plist
+launchctl load ~/Library/LaunchAgents/local.reading-librarian.daily.plist
 ```
 
 ## Notes
