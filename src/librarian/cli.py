@@ -57,6 +57,9 @@ class Config:
     model_command: list[str] = field(default_factory=list)
     model_max_input_chars: int = 12000
     require_external_model_approval: bool = True
+    email_from: str = ""
+    email_to: str = ""
+    message_to: str = ""
 
 
 @dataclass
@@ -131,6 +134,12 @@ class ModelEnrichment:
 
 
 @dataclass
+class ModelEnrichmentAttempt:
+    enrichment: ModelEnrichment | None = None
+    reason: str = ""
+
+
+@dataclass
 class MountRecommendation:
     model_command: list[str]
     model_note: str
@@ -174,6 +183,9 @@ def project_config(root: Path) -> Config:
         model_command=model_command(behavior.get("model_command", [])),
         model_max_input_chars=int(behavior.get("model_max_input_chars", 12000)),
         require_external_model_approval=bool(behavior.get("require_external_model_approval", True)),
+        email_from=str(behavior.get("email_from", "")),
+        email_to=str(behavior.get("email_to", "")),
+        message_to=str(behavior.get("message_to", "")),
     )
 
 
@@ -257,6 +269,9 @@ model_max_input_chars = 12000
 require_external_model_approval = true
 use_catalog_lookup = false
 catalog_timeout_seconds = 5
+email_from = ""
+email_to = ""
+message_to = ""
 """
 
 
@@ -693,11 +708,12 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
         summary=summary,
     )
     if use_model_enrichment and next_action == "needs_model":
-        enrichment = enrich_from_model(
+        attempt = try_enrich_from_model(
             config=config,
             entry=WorkEntry(author=author, title=title, year=year, work_type=work_type, original_filename=path.name),
             text=text,
         )
+        enrichment = attempt.enrichment
         if enrichment:
             summary = enrichment.summary
             primer_prompts = enrichment.primer_prompts
@@ -709,7 +725,7 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
                 related = "None."
             next_action = "clean"
         else:
-            review.append("Model enrichment failed or returned incomplete output.")
+            review.append(f"Model enrichment failed: {attempt.reason}.")
             related = "None."
     else:
         related = "None."
@@ -1196,7 +1212,19 @@ def year_context_is_digitization(text: str, start: int, end: int) -> bool:
 
 def clean_title(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip(" -_\t\r\n")
-    return value or "Untitled"
+    return polish_title(value) or "Untitled"
+
+
+def polish_title(value: str) -> str:
+    value = re.sub(r"\bPreventionof\b", "Prevention of", value)
+    value = re.sub(r"\bGuideto\b", "Guide to", value)
+    value = re.sub(r"\bFundamentalsof\b", "Fundamentals of", value)
+    value = re.sub(r"\bReproducability\b", "Reproducibility", value)
+    trailing_articles = {"The", "A", "An"}
+    words = value.split()
+    if len(words) > 2 and words[-1] in trailing_articles:
+        value = " ".join([words[-1], *words[:-1]])
+    return value
 
 
 def clean_author(value: str) -> str:
@@ -1301,8 +1329,14 @@ def infer_tags(title: str, text: str, work_type: str) -> list[str]:
 
 
 def enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelEnrichment | None:
+    return try_enrich_from_model(config, entry, text).enrichment
+
+
+def try_enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelEnrichmentAttempt:
     if not config.model_command or not text.strip():
-        return None
+        if not config.model_command:
+            return ModelEnrichmentAttempt(reason="model_command is not configured")
+        return ModelEnrichmentAttempt(reason="no text excerpt is available")
     payload = {
         "task": "enrich_reading_index_entry",
         "instructions": [
@@ -1338,35 +1372,48 @@ def enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelEnric
             timeout=120,
             check=False,
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        return ModelEnrichmentAttempt(reason=f"model command could not be started: {one_line(str(exc))}")
     except subprocess.TimeoutExpired:
-        return None
+        return ModelEnrichmentAttempt(reason="model command timed out after 120 seconds")
     if completed.returncode != 0:
-        return None
+        details = one_line(completed.stderr.strip() or completed.stdout.strip())
+        reason = f"model command exited with code {completed.returncode}"
+        if details:
+            reason = f"{reason}: {truncate(details, 240)}"
+        return ModelEnrichmentAttempt(reason=reason)
     try:
         raw = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as exc:
+        return ModelEnrichmentAttempt(reason=f"model command did not return valid JSON: {exc.msg}")
+    if not isinstance(raw, dict):
+        return ModelEnrichmentAttempt(reason="model command returned JSON that was not an object")
     enrichment = ModelEnrichment(
         summary=one_line(str(raw.get("summary", ""))),
         primer_prompts=[one_line(str(item)) for item in raw.get("primer_prompts", []) if one_line(str(item))],
         tags=[normalize_tag(str(item)) for item in raw.get("tags", []) if normalize_tag(str(item))],
         related=one_line(str(raw.get("related", ""))),
     )
-    if enrichment_is_usable(entry, enrichment):
-        return enrichment
-    return None
+    reason = enrichment_validation_reason(entry, enrichment)
+    if reason:
+        return ModelEnrichmentAttempt(reason=reason)
+    return ModelEnrichmentAttempt(enrichment=enrichment)
 
 
 def enrichment_is_usable(entry: WorkEntry, enrichment: ModelEnrichment) -> bool:
+    return not enrichment_validation_reason(entry, enrichment)
+
+
+def enrichment_validation_reason(entry: WorkEntry, enrichment: ModelEnrichment) -> str:
     title_key = normalize_lookup_text(entry.display_title)
     summary_key = normalize_lookup_text(enrichment.summary)
     if len(enrichment.summary.split()) < 12:
-        return False
+        return "summary is too short"
     if title_key and summary_key == title_key:
-        return False
-    return len(enrichment.primer_prompts) >= 2
+        return "summary only repeats the title"
+    if len(enrichment.primer_prompts) < 2:
+        return "fewer than two primer prompts were returned"
+    return ""
 
 
 def normalize_tag(value: str) -> str:
@@ -1835,6 +1882,10 @@ def shell_join(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def shell_quote(value: str) -> str:
+    return shlex.quote(value)
+
+
 def command_reindex(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
@@ -1933,6 +1984,9 @@ def command_weekly(args: argparse.Namespace, root: Path) -> int:
             allow_repeats=args.allow_repeats,
             notify=not args.no_notify,
             email=args.email,
+            notify_mac=args.notify_mac,
+            open=args.open,
+            message_self=args.message_self,
         ),
         root,
     )
@@ -2101,11 +2155,27 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
 
     if not plan:
         print("No digest-ready unread works found. Run `librarian enrich --apply` or ingest new files with `librarian ingest --enrich --apply`.")
+        guidance = digest_blocker_guidance(entries)
+        if guidance:
+            print("Next actions:")
+            for line in guidance:
+                print(f"- {line}")
         return 1
 
+    if args.apply and args.email:
+        require_email_config(config)
+    if args.apply and args.message_self:
+        require_message_config(config)
     prefix = "[dry-run] " if not args.apply else ""
     print(f"{prefix}Digest pick: {plan.entry.display_title} by {plan.entry.author}")
     print(f"{prefix}Draft path: {plan.draft_path.relative_to(root)}")
+    if args.notify_mac:
+        print(f"{prefix}Mac notification: {plan.entry.display_title}")
+    if args.open:
+        print(f"{prefix}Open file: {(config.library / plan.entry.filename).relative_to(root)}")
+    if args.message_self:
+        recipient = configured_message_recipient(config) or "unconfigured recipient"
+        print(f"{prefix}Message self: {recipient}")
     if args.notify:
         print(render_digest_notification(plan.entry, plan.draft_path, plan.history))
     if not args.apply:
@@ -2113,13 +2183,13 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
         print("Dry run only. Re-run with --apply to write the draft and sent log.")
         if args.email:
             print("Email not sent in dry-run mode.")
+        if args.notify_mac or args.open or args.message_self:
+            print("Local delivery not run in dry-run mode.")
         return 0
 
-    if args.email:
-        require_email_config()
     write_text_without_overwrite(plan.draft_path, plan.body)
     if args.email:
-        send_digest_email(plan.entry, plan.body)
+        send_digest_email(config, plan.entry, plan.body)
     plan.entry.sent = today()
     entries = upsert_entry(entries, plan.entry)
     write_index(config.index, entries)
@@ -2127,6 +2197,7 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     print(f"Wrote {plan.draft_path.relative_to(root)}.")
     if args.email:
         print("Sent digest email.")
+    run_local_delivery(config, plan, root, args)
     return 0
 
 
@@ -2173,10 +2244,10 @@ def command_reply(args: argparse.Namespace, root: Path) -> int:
         return 0
 
     if args.email:
-        require_email_config()
+        require_email_config(config)
     write_text_without_overwrite(plan.draft_path, plan.body)
     if args.email:
-        send_digest_email(plan.entry, plan.body)
+        send_digest_email(config, plan.entry, plan.body)
     if old_status != "skipped":
         append_status_log(config.status_log, current, old_status, "skipped")
     plan.entry.sent = today()
@@ -2237,9 +2308,10 @@ def command_enrich(args: argparse.Namespace, root: Path) -> int:
         if review:
             print(f"[dry-run] SKIP {entry.filename}: {'; '.join(review)}")
             continue
-        enrichment = enrich_from_model(config, entry, text)
+        attempt = try_enrich_from_model(config, entry, text)
+        enrichment = attempt.enrichment
         if not enrichment:
-            print(f"[dry-run] SKIP {entry.filename}: model returned incomplete enrichment.")
+            print(f"[dry-run] SKIP {entry.filename}: {attempt.reason}.")
             continue
         print(f"[dry-run] ENRICH {entry.filename}: {enrichment.summary}")
         if args.apply:
@@ -2354,6 +2426,46 @@ def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: b
     draft_path = unique_path(config.drafts / draft_name)
     draft = digest_draft(pick, config.library / pick.filename, history)
     return DigestPlan(pick, draft_path, draft, history)
+
+
+def digest_blocker_guidance(entries: list[WorkEntry], limit: int = 3) -> list[str]:
+    blocked = [
+        entry
+        for entry in entries
+        if entry.status not in {"read", "skipped"} and not entry_digest_ready(entry)
+    ]
+    ranked = sorted(blocked, key=lambda entry: (digest_blocker_rank(entry), entry.author_key, entry.display_title.lower()))
+    return [digest_blocker_line(entry) for entry in ranked[:limit]]
+
+
+def digest_blocker_rank(entry: WorkEntry) -> int:
+    ranks = {
+        "needs_model": 0,
+        "needs_catalog": 1,
+        "needs_ocr": 2,
+        "needs_manual": 3,
+    }
+    if entry.next_action in ranks:
+        return ranks[entry.next_action]
+    if not entry.primer_prompts or not usable_digest_summary(entry):
+        return 0
+    return 4
+
+
+def digest_blocker_line(entry: WorkEntry) -> str:
+    title = one_line(entry.display_title)
+    if entry.next_action == "needs_model":
+        return f"{title} ({entry.author}) needs model enrichment -> librarian enrich {shell_quote(title)}"
+    if entry.next_action == "needs_ocr":
+        return f"{title} ({entry.author}) needs OCR -> librarian ocr {shell_quote(title)}"
+    if entry.next_action == "needs_catalog":
+        return f"{title} ({entry.author}) has weak metadata -> librarian maintain --lookup"
+    if entry.next_action == "needs_manual":
+        reasons = "; ".join(review_reasons(entry)) or "manual review is needed"
+        return f"{title} ({entry.author}) needs manual review: {one_line(reasons)}"
+    if not entry.primer_prompts or not usable_digest_summary(entry):
+        return f"{title} ({entry.author}) needs model enrichment -> librarian enrich {shell_quote(title)}"
+    return f"{title} ({entry.author}) is not digest-ready: {one_line('; '.join(review_reasons(entry)) or entry.next_action)}"
 
 
 def digest_draft(entry: WorkEntry, local_path: Path, history: DigestHistory) -> str:
@@ -2471,8 +2583,84 @@ def render_digest_notification(entry: WorkEntry, draft_path: Path, history: Dige
     )
 
 
-def send_digest_email(entry: WorkEntry, body: str) -> None:
-    api_key, sender, recipient = require_email_config()
+def run_local_delivery(config: Config, plan: DigestPlan, root: Path, args: argparse.Namespace) -> None:
+    if args.notify_mac:
+        send_mac_notification(plan.entry, plan.draft_path)
+        print("Posted Mac notification.")
+    if args.open:
+        open_local_file(config.library / plan.entry.filename)
+        print(f"Opened {Path(plan.entry.filename).name}.")
+    if args.message_self:
+        send_message_to_self(config, plan.entry, plan.draft_path, plan.history)
+        print("Sent Messages notification.")
+
+
+def send_mac_notification(entry: WorkEntry, draft_path: Path) -> None:
+    script = (
+        'display notification '
+        f'{applescript_literal(first_primer_prompt(entry))} '
+        'with title "Read of the Week" '
+        f'subtitle {applescript_literal(entry.display_title)}'
+    )
+    run_osascript(script, "Mac notification failed")
+
+
+def open_local_file(path: Path) -> None:
+    completed = subprocess.run(["open", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    if completed.returncode != 0:
+        details = one_line(completed.stderr.strip() or completed.stdout.strip())
+        raise ValueError(f"Could not open local file: {details}")
+
+
+def send_message_to_self(config: Config, entry: WorkEntry, draft_path: Path, history: DigestHistory) -> None:
+    recipient = require_message_config(config)
+    message = render_self_message(entry, draft_path, history)
+    script = (
+        'tell application "Messages"\n'
+        f"  set targetBuddy to {applescript_literal(recipient)}\n"
+        '  set targetService to 1st service whose service type = iMessage\n'
+        f"  send {applescript_literal(message)} to buddy targetBuddy of targetService\n"
+        "end tell"
+    )
+    run_osascript(script, "Messages send failed")
+
+
+def render_self_message(entry: WorkEntry, draft_path: Path, history: DigestHistory) -> str:
+    return "\n".join(
+        [
+            f"Read of the Week: {entry.display_title}",
+            f"Author: {entry.author}",
+            f"Summary: {entry.summary}",
+            f"Prompt: {first_primer_prompt(entry)}",
+            f"Draft: {draft_path}",
+        ]
+    )
+
+
+def run_osascript(script: str, error_prefix: str) -> None:
+    completed = subprocess.run(["osascript", "-e", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    if completed.returncode != 0:
+        details = one_line(completed.stderr.strip() or completed.stdout.strip())
+        raise ValueError(f"{error_prefix}: {details}")
+
+
+def applescript_literal(value: str) -> str:
+    return json.dumps(value)
+
+
+def configured_message_recipient(config: Config) -> str:
+    return os.environ.get("LIBRARIAN_MESSAGE_TO", "") or config.message_to
+
+
+def require_message_config(config: Config) -> str:
+    recipient = configured_message_recipient(config)
+    if not recipient:
+        raise ValueError("Messages delivery requires LIBRARIAN_MESSAGE_TO or message_to in _state/config.toml.")
+    return recipient
+
+
+def send_digest_email(config: Config, entry: WorkEntry, body: str) -> None:
+    api_key, sender, recipient = require_email_config(config)
     payload = json.dumps(
         {
             "from": sender,
@@ -2499,12 +2687,12 @@ def send_digest_email(entry: WorkEntry, body: str) -> None:
         raise ValueError(f"Email delivery failed: {exc}") from exc
 
 
-def require_email_config() -> tuple[str, str, str]:
+def require_email_config(config: Config | None = None) -> tuple[str, str, str]:
     api_key = os.environ.get("RESEND_API_KEY", "")
-    sender = os.environ.get("LIBRARIAN_EMAIL_FROM", "")
-    recipient = os.environ.get("LIBRARIAN_EMAIL_TO", "")
+    sender = os.environ.get("LIBRARIAN_EMAIL_FROM", "") or (config.email_from if config else "")
+    recipient = os.environ.get("LIBRARIAN_EMAIL_TO", "") or (config.email_to if config else "")
     if not api_key or not sender or not recipient:
-        raise ValueError("Email delivery requires RESEND_API_KEY, LIBRARIAN_EMAIL_FROM, and LIBRARIAN_EMAIL_TO.")
+        raise ValueError("Email delivery requires RESEND_API_KEY plus LIBRARIAN_EMAIL_FROM/LIBRARIAN_EMAIL_TO or email_from/email_to in _state/config.toml.")
     return api_key, sender, recipient
 
 
@@ -2646,6 +2834,9 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--allow-repeats", action="store_true")
     weekly.add_argument("--no-notify", action="store_true")
     weekly.add_argument("--email", action="store_true")
+    weekly.add_argument("--notify-mac", action="store_true", help="Post a macOS notification after writing the weekly draft.")
+    weekly.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
+    weekly.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
     enrich = sub.add_parser("enrich")
     enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
@@ -2660,12 +2851,18 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--allow-repeats", action="store_true")
     weekly.add_argument("--notify", action="store_true")
     weekly.add_argument("--email", action="store_true")
+    weekly.add_argument("--notify-mac", action="store_true")
+    weekly.add_argument("--open", action="store_true")
+    weekly.add_argument("--message-self", action="store_true")
 
     digest = sub.add_parser("digest")
     digest.add_argument("--apply", action="store_true")
     digest.add_argument("--allow-repeats", action="store_true")
     digest.add_argument("--notify", action="store_true")
     digest.add_argument("--email", action="store_true")
+    digest.add_argument("--notify-mac", action="store_true", help="Post a macOS notification after writing the digest draft.")
+    digest.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the digest draft.")
+    digest.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
     reply = sub.add_parser("reply")
     reply.add_argument("action", choices=["skip", "read", "new"])

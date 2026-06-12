@@ -20,6 +20,14 @@ Weekly digest:
 
 This writes one weekly draft, marks the selected work sent, and appends `_state/sent-log.md`. It does not send email. Use `weekly --email --apply` only after the user explicitly configures and requests email.
 
+Low-friction local delivery:
+
+```bash
+.venv/bin/librarian weekly --apply --notify-mac --open --message-self
+```
+
+This writes the weekly draft, posts a macOS notification, opens the local reading file, and sends the title, summary, first prompt, and draft path through Messages. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
+
 ## Preview Commands
 
 Use these before enabling write-state automation:
@@ -70,5 +78,7 @@ If the scheduler supports job names, use clear names such as `Daily librarian in
 - To switch from preview to live, add `--apply`.
 - To switch from live to preview, remove `--apply`.
 - To enable email later, configure `RESEND_API_KEY`, `LIBRARIAN_EMAIL_FROM`, and `LIBRARIAN_EMAIL_TO`, then change the weekly command to `weekly --email --apply`.
+- Alternatively, keep `email_from` and `email_to` in ignored `_state/config.toml` and provide only `RESEND_API_KEY` through the scheduler environment. Do not store the Resend API key in the repo.
+- To enable Messages delivery, configure `LIBRARIAN_MESSAGE_TO` or `message_to` in ignored `_state/config.toml`.
 
 Run `.venv/bin/librarian lint` after changing scheduler behavior.

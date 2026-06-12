@@ -135,6 +135,19 @@ After the synthetic test passes, check `require_external_model_approval` before 
 - `true` or missing: ask the user for explicit approval before each new real-file enrichment batch.
 - `false`: the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
 
+## Codex Hook Sandbox Note
+
+A Codex CLI hook is still provider-specific local state, even when the public repo stays provider-neutral. Codex auth and runtime state normally live under `CODEX_HOME`, usually `~/.codex`.
+
+When an agent runs inside a managed Codex sandbox, a nested `codex exec` command may fail before producing enrichment JSON because it cannot open Codex state, update its shell environment, or reach the model provider. The correct workflow is:
+
+1. Run `librarian enrich "Title"` without `--apply`.
+2. If the dry run reports Codex state, auth, or network sandbox errors, rerun that same dry-run command with explicit user approval for escalated execution.
+3. Review the proposed enrichment output.
+4. Only then run the matching `--apply` command, again with explicit approval if the same sandbox limitation applies.
+
+Do not work around this by moving `library/`, `_state/`, or `CODEX_HOME` outside the project rules. Do not set `CODEX_HOME` inside the repo unless the user intentionally wants to log in to a separate project-local Codex home.
+
 ## Safety
 
 `mount` writes only `_state/config.toml`, and only with `--apply`.

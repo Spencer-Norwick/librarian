@@ -106,6 +106,19 @@ See `docs/automation.md` for daily and weekly scheduler setup.
 
 Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
 
+Local delivery is available without email:
+
+```bash
+librarian weekly --apply --notify-mac --open --message-self
+```
+
+`--notify-mac` posts a macOS notification, `--open` opens the selected local reading file, and `--message-self` sends the title, summary, first prompt, and draft path through Messages. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` or ignored local config:
+
+```toml
+[behavior]
+message_to = "you@example.com"
+```
+
 `reply` is the command-line target for automation or email-reply handlers. It acts on the latest sent digest from `_state/sent-log.md`: `reply skip --apply` marks it skipped, `reply read --apply` marks it read, and `reply new --apply` marks it skipped and writes the next digest-ready draft. Like the rest of the tool, it previews by default.
 
 ## Metadata Pipeline
@@ -186,6 +199,8 @@ For public forks, provider-specific hooks should be created in ignored local sta
 
 `require_external_model_approval` is the project-level consent toggle for agents. The public default is `true`; a local user can set it to `false` in ignored `_state/config.toml` after deciding that the configured provider may receive enrichment excerpts.
 
+Codex CLI hooks require access to the user's Codex auth/state under `CODEX_HOME`, usually `~/.codex`, and may need network access. In managed sandboxed agent sessions, preview `librarian enrich ...` first; if Codex state, auth, or network sandbox errors appear, rerun the same dry-run command with explicit approval for escalated execution before using `--apply`.
+
 ## Filename Convention
 
 ```text
@@ -222,6 +237,16 @@ export RESEND_API_KEY="..."
 export LIBRARIAN_EMAIL_FROM="Reading Librarian <reads@example.com>"
 export LIBRARIAN_EMAIL_TO="you@example.com"
 ```
+
+Or keep the non-secret sender and recipient in ignored local config:
+
+```toml
+[behavior]
+email_from = "Reading Librarian <reads@example.com>"
+email_to = "you@example.com"
+```
+
+`RESEND_API_KEY` should still come from the environment.
 
 ## Scheduling Examples
 

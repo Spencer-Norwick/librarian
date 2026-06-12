@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from librarian.cli import WorkEntry, filename_convention_ok, infer_year_from_text, main, read_index, render_index, today
+from librarian.cli import WorkEntry, clean_title, filename_convention_ok, infer_year_from_text, main, read_index, render_index, today
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -51,6 +51,11 @@ class LibrarianCliTests(unittest.TestCase):
             "}))\n",
             encoding="utf-8",
         )
+        return f"python3 {script}"
+
+    def fake_model_script(self, root: Path, name: str, body: str) -> str:
+        script = root / name
+        script.write_text(body, encoding="utf-8")
         return f"python3 {script}"
 
     def fake_ocr_command(self, root: Path) -> str:
@@ -225,6 +230,30 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertTrue((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
 
+    def test_happy_path_ingest_enrich_weekly_and_reply_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_command(root)
+            source = root / "inbox" / "BakerAnn_AttentionTools_2001_essay.txt"
+            source.write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, _ = self.run_cli(root, "ingest", "--enrich", "--apply")
+            self.assertEqual(code, 0)
+
+            code, output = self.run_cli(root, "weekly", "--apply")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Attention Tools by Baker, Ann", output)
+            self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 1)
+
+            code, output = self.run_cli(root, "reply", "read", "--apply")
+            self.assertEqual(code, 0)
+            self.assertIn("Updated Attention Tools to read.", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].status, "read")
+            self.assertIn("unread -> read", (root / "_state" / "status-log.md").read_text(encoding="utf-8"))
+
     def test_daily_maintain_opt_in_runs_full_library_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -288,6 +317,14 @@ class LibrarianCliTests(unittest.TestCase):
         self.assertTrue(filename_convention_ok("Rubin_Rick_CreativeActThe_AWayofBeing_2023_book.pdf"))
         self.assertTrue(filename_convention_ok("Wallace_David_Foster_EUnibusPluram_1993_essay.pdf"))
         self.assertFalse(filename_convention_ok("bad name.pdf"))
+
+    def test_title_polish_repairs_known_filename_artifacts(self) -> None:
+        self.assertEqual(clean_title("Preventionof Literature The"), "The Prevention of Literature")
+        self.assertEqual(clean_title("Engineers Guideto Fundamentalsof Control Theory"), "Engineers Guide to Fundamentals of Control Theory")
+        self.assertEqual(
+            clean_title("Work Of Art In The Age Of Its Technological Reproducability The"),
+            "The Work Of Art In The Age Of Its Technological Reproducibility",
+        )
 
     def test_unknown_author_goes_to_needs_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -448,6 +485,61 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].sent, today())
             self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 1)
 
+    def test_weekly_local_delivery_dry_run_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch("librarian.cli.subprocess.run") as run:
+                code, output = self.run_cli(root, "weekly", "--notify-mac", "--open", "--message-self")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] Mac notification: Never Sent", output)
+            self.assertIn("[dry-run] Open file: library/BAuthor_NeverSent_2001_book.txt", output)
+            self.assertIn("[dry-run] Message self: unconfigured recipient", output)
+            self.assertIn("Local delivery not run in dry-run mode.", output)
+            self.assertFalse(run.called)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
+
+    def test_weekly_message_self_requires_recipient_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "weekly", "--apply", "--message-self")
+
+            self.assertEqual(code, 2)
+            self.assertIn("Messages delivery requires", output)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
+
+    def test_weekly_apply_runs_local_delivery_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / entry.filename).write_text("reading file", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch("librarian.cli.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = ""
+                run.return_value.stderr = ""
+                code, output = self.run_cli(root, "weekly", "--apply", "--notify-mac", "--open", "--message-self")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Posted Mac notification.", output)
+            self.assertIn("Opened BAuthor_NeverSent_2001_book.txt.", output)
+            self.assertIn("Sent Messages notification.", output)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0][:2], ["osascript", "-e"])
+            self.assertEqual(commands[1][0], "open")
+            self.assertEqual(commands[2][:2], ["osascript", "-e"])
+            self.assertIn("Read of the Week: Never Sent", commands[2][2])
+
     def test_digest_history_counts_prior_sends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -524,6 +616,29 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertTrue(urlopen.called)
             self.assertIn("emailed and drafted as", (root / "_state" / "sent-log.md").read_text(encoding="utf-8"))
 
+    def test_digest_email_can_use_configured_sender_and_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            config_path = root / "_state" / "config.toml"
+            config_text = config_path.read_text(encoding="utf-8")
+            config_text = config_text.replace('email_from = ""', 'email_from = "Reading Librarian <reads@example.com>"')
+            config_text = config_text.replace('email_to = ""', 'email_to = "me@example.com"')
+            config_path.write_text(config_text, encoding="utf-8")
+
+            with patch.dict(os.environ, {"RESEND_API_KEY": "test-key"}, clear=True), patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = io.BytesIO(b'{"id":"email_123"}')
+                code, output = self.run_cli(root, "digest", "--email", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Sent digest email.", output)
+            request = urlopen.call_args.args[0]
+            payload = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(payload["from"], "Reading Librarian <reads@example.com>")
+            self.assertEqual(payload["to"], ["me@example.com"])
+
     def test_digest_skips_unenriched_model_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -542,6 +657,45 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 1)
             self.assertIn("No digest-ready unread works found", output)
+            self.assertIn("Next actions:", output)
+            self.assertIn("Never Sent (B, Author) needs model enrichment -> librarian enrich 'Never Sent'", output)
+
+    def test_digest_empty_state_lists_ranked_next_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entries = [
+                WorkEntry(
+                    author="B, Author",
+                    title="Needs Model",
+                    filename="BAuthor_NeedsModel_2001_book.txt",
+                    summary="Needs Model",
+                    next_action="needs_model",
+                ),
+                WorkEntry(
+                    author="C, Author",
+                    title="Needs OCR",
+                    filename="CAuthor_NeedsOcr_2002_book.pdf",
+                    summary="No extractable text found; OCR is needed before a reliable summary can be written.",
+                    next_action="needs_ocr",
+                ),
+                WorkEntry(
+                    author="Unknown",
+                    title="Weak Metadata",
+                    filename="Unknown_WeakMetadata_nd_unknown.txt",
+                    summary="Needs review.",
+                    next_action="needs_catalog",
+                ),
+            ]
+            (root / "library" / "index.md").write_text(render_index(entries), encoding="utf-8")
+
+            code, output = self.run_cli(root, "weekly")
+
+            self.assertEqual(code, 1)
+            self.assertIn("Next actions:", output)
+            self.assertIn("Needs Model (B, Author) needs model enrichment -> librarian enrich 'Needs Model'", output)
+            self.assertIn("Weak Metadata (Unknown) has weak metadata -> librarian maintain --lookup", output)
+            self.assertIn("Needs OCR (C, Author) needs OCR -> librarian ocr 'Needs OCR'", output)
 
     def test_reply_skip_dry_run_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -658,6 +812,66 @@ class LibrarianCliTests(unittest.TestCase):
             entries = read_index(root / "library" / "index.md")
             self.assertEqual(entries[0].next_action, "clean")
             self.assertEqual(len(entries[0].primer_prompts), 3)
+
+    def test_enrich_reports_model_command_exit_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_script(
+                root,
+                "failing_model.py",
+                "import sys\n"
+                "print('provider quota exceeded', file=sys.stderr)\n"
+                "raise SystemExit(7)\n",
+            )
+            filename = "AuthorB_Test_2001_essay.txt"
+            (root / "library" / filename).write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            entry = WorkEntry(author="B, Author", title="Test", filename=filename, summary="Test.", next_action="needs_model")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "enrich", "Test")
+
+            self.assertEqual(code, 0)
+            self.assertIn("model command exited with code 7", output)
+            self.assertIn("provider quota exceeded", output)
+
+    def test_enrich_reports_invalid_model_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_script(root, "invalid_json_model.py", "print('not json')\n")
+            filename = "AuthorB_Test_2001_essay.txt"
+            (root / "library" / filename).write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            entry = WorkEntry(author="B, Author", title="Test", filename=filename, summary="Test.", next_action="needs_model")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "enrich", "Test")
+
+            self.assertEqual(code, 0)
+            self.assertIn("model command did not return valid JSON", output)
+
+    def test_enrich_reports_incomplete_model_output_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_script(
+                root,
+                "short_summary_model.py",
+                "import json\n"
+                "print(json.dumps({'summary': 'Too short.', 'primer_prompts': ['First?', 'Second?'], 'tags': [], 'related': 'None.'}))\n",
+            )
+            filename = "AuthorB_Test_2001_essay.txt"
+            (root / "library" / filename).write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            entry = WorkEntry(author="B, Author", title="Test", filename=filename, summary="Test.", next_action="needs_model")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "enrich", "Test")
+
+            self.assertEqual(code, 0)
+            self.assertIn("summary is too short", output)
 
     def test_mark_read_requires_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

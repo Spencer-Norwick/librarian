@@ -30,11 +30,14 @@ Mount protocol for new users or forks:
 - Write local config only with `librarian mount --apply`.
 - Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
 - Prefer `privacy=assisted` and `digest=notify`.
+- Prefer local weekly delivery for this user when requested: `librarian weekly --apply --notify-mac --open --message-self`. Configure `message_to` in ignored `_state/config.toml` or `LIBRARIAN_MESSAGE_TO`; do not require email for the default low-friction flow.
 - Before sending text excerpts to an external model, check `_state/config.toml` for `require_external_model_approval`; if it is missing or true, ask for explicit user approval.
 - If `require_external_model_approval = false`, the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
 - If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
 - The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
 - Test model hooks with synthetic non-library text before asking to enrich real files.
+- Codex-based model hooks need access to the user's Codex auth/state under `CODEX_HOME` such as `~/.codex` and may need network access. In a managed Codex sandbox, first run `librarian enrich ...` as a dry run; if it fails with Codex state, auth, or network sandbox errors, request an approved escalated dry-run for that command rather than changing project paths or applying a broad batch.
+- Do not set `CODEX_HOME` inside this repo unless the user deliberately wants a separate local Codex login there; keep normal Codex auth/state outside the public project.
 - Use `librarian ocr` for scanned-PDF repair; do not replace or delete library files automatically.
 - See `docs/mount.md` for the full human and agent runbook.
 - See `docs/automation.md` for daily, weekly, and reply automation setup.
