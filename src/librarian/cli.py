@@ -412,7 +412,7 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 See `docs/mount.md` for the human and agent setup runbook.
 See `docs/automation.md` for daily and weekly scheduler setup.
 
-`daily` is the automation-friendly daily workflow. It ingests new inbox files, then runs lint. It does not reparse existing library files by default. Use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` for new files when those configured capabilities should run. Add `--maintain` only when you want the full library maintenance pass.
+`daily` is the automation-friendly daily workflow. It prepares scanned inbox PDFs with OCR when needed, ingests supported inbox files with optional catalog lookup and model enrichment, and then runs lint. Use `daily --apply --lookup --enrich` for the unattended new-file pipeline when catalog lookup and model enrichment are configured. Full-library maintenance remains explicit with `--maintain`. Dry-run remains non-mutating.
 
 `weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 
@@ -536,7 +536,7 @@ The recommended automation commands are documented in `docs/automation.md`.
 ### cron
 
 ```cron
-0 8 * * * cd /path/to/reading-librarian && librarian daily --apply
+0 8 * * * cd /path/to/reading-librarian && librarian daily --apply --lookup --enrich
 0 9 * * 1 cd /path/to/reading-librarian && librarian lint
 0 10 * * 1 cd /path/to/reading-librarian && librarian weekly --apply
 ```
@@ -1955,10 +1955,99 @@ def command_maintain(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def command_prepare_inbox(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    plans = build_inbox_preparation_plan(config, use_catalog_lookup=args.lookup)
+    if not plans:
+        print("No inbox preparation needed.")
+        return 0
+
+    prefix = "[dry-run] " if not args.apply else ""
+    for source, ocr_target, original_target in plans:
+        print(f"{prefix}OCR inbox PDF: {source.relative_to(root)} -> {ocr_target.relative_to(root)}")
+        print(f"{prefix}Preserve original scan: {original_target.relative_to(root)}")
+
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to prepare scanned inbox PDFs.")
+        return 0
+
+    if not config.ocr_command:
+        print("OCR requires `ocr_command` in _state/config.toml or LIBRARIAN_OCR_COMMAND.")
+        return 2
+    if not command_available(config.ocr_command[0]):
+        print(f"OCR command not found: {config.ocr_command[0]}")
+        return 2
+
+    changed = 0
+    for source, ocr_target, original_target in plans:
+        ocr_target.parent.mkdir(parents=True, exist_ok=True)
+        original_target.parent.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run(
+            config.ocr_command + [str(source), str(ocr_target)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            print(f"SKIP {source.name}: OCR command failed.")
+            if completed.stderr.strip():
+                print(completed.stderr.strip())
+            continue
+        move_without_overwrite(source, original_target)
+        changed += 1
+        print(f"Prepared OCR inbox copy {ocr_target.relative_to(root)}; preserved original at {original_target.relative_to(root)}.")
+    print(f"Prepared {changed} scanned inbox PDF{'s' if changed != 1 else ''}.")
+    return 0
+
+
+def build_inbox_preparation_plan(config: Config, use_catalog_lookup: bool = False) -> list[tuple[Path, Path, Path]]:
+    plans: list[tuple[Path, Path, Path]] = []
+    reserved_inbox = {path.name for path in config.inbox.iterdir() if path.is_file()} if config.inbox.exists() else set()
+    original_dir = config.ocr_outputs / "original-inbox-scans"
+    reserved_originals = {path.name for path in original_dir.iterdir() if path.is_file()} if original_dir.exists() else set()
+
+    for source in supported_files(config, config.inbox):
+        if source.suffix.lower() != ".pdf":
+            continue
+        _metadata, text, review = extract_pdf(source)
+        if text.strip():
+            continue
+        if any("PDF extraction failed" in item for item in review):
+            continue
+        entry = infer_entry(source, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=False)
+        target_name = make_filename(entry, config, source.suffix.lower())
+        if target_name == source.name or target_name.startswith("Unknown_") or not filename_convention_ok(target_name):
+            target_name = f"{source.stem}_ocr{source.suffix.lower()}"
+        target_name = unique_filename(config.inbox, target_name, source, reserved_inbox - {source.name})
+        reserved_inbox.add(target_name)
+        original_name = unique_filename(original_dir, source.name, source, reserved_originals)
+        reserved_originals.add(original_name)
+        plans.append((source, config.inbox / target_name, original_dir / original_name))
+    return plans
+
+
 def command_daily(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    auto_lookup = args.lookup or config.use_catalog_lookup
+    auto_enrich = args.enrich or config.use_model_assistance
+    if auto_enrich and not config.model_command:
+        print("Daily workflow: model enrichment skipped; model_command is not configured.")
+        auto_enrich = False
+
+    print("Daily workflow: prepare inbox")
+    prepare_code = command_prepare_inbox(
+        argparse.Namespace(apply=args.apply, lookup=auto_lookup),
+        root,
+    )
+    if prepare_code:
+        return prepare_code
+
     print("Daily workflow: ingest")
     ingest_code = command_ingest(
-        argparse.Namespace(apply=args.apply, lookup=args.lookup, enrich=args.enrich),
+        argparse.Namespace(apply=args.apply, lookup=auto_lookup, enrich=auto_enrich),
         root,
     )
     if ingest_code:
@@ -1967,7 +2056,7 @@ def command_daily(args: argparse.Namespace, root: Path) -> int:
     if args.maintain:
         print("Daily workflow: maintain")
         maintain_code = command_maintain(
-            argparse.Namespace(apply=args.apply, lookup=args.lookup, enrich=args.enrich),
+            argparse.Namespace(apply=args.apply, lookup=auto_lookup, enrich=auto_enrich),
             root,
         )
         if maintain_code:

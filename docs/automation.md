@@ -19,10 +19,10 @@ Supported selected files are `.pdf`, `.epub`, `.txt`, `.md`, and `.docx`. Folder
 Daily ingest:
 
 ```bash
-.venv/bin/librarian daily --apply
+.venv/bin/librarian daily --apply --lookup --enrich
 ```
 
-This ingests only new supported files from `inbox/`, updates `library/index.md`, and runs lint. It does not reparse existing library files. Add `--lookup` or `--enrich` only after the user has chosen those behaviors. Add `--maintain` only for a deliberate full-library repair pass.
+This prepares scanned inbox PDFs with OCR when needed, ingests supported files from `inbox/`, updates `library/index.md`, and runs lint. Add `--lookup --enrich` after the user has chosen catalog lookup and model enrichment for unattended new-file operation. Use `--maintain` only for a deliberate full-library repair pass.
 
 Weekly digest:
 
@@ -51,7 +51,7 @@ Use these before enabling write-state automation:
 
 Expected safe output:
 
-- `daily` reports pending inbox moves or says no supported files were found.
+- `daily` reports OCR preparation, pending inbox moves, and lint status, or says no supported files were found.
 - `weekly` prints a notification preview and draft body without writing a draft or sent state.
 
 ## Reply Commands

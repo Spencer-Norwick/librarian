@@ -86,7 +86,7 @@ Commands that modify files or Markdown are dry-run by default. Use `--apply` to 
 See `docs/mount.md` for the human and agent setup runbook.
 See `docs/automation.md` for daily and weekly scheduler setup.
 
-`daily` is the automation-friendly daily workflow. It ingests new inbox files, then runs lint. It does not reparse existing library files by default. Use `daily --apply` to move files and update Markdown. Add `--lookup` or `--enrich` for new files when those configured capabilities should run. Add `--maintain` only when you want the full library maintenance pass.
+`daily` is the automation-friendly daily workflow. It prepares scanned inbox PDFs with OCR when needed, ingests supported inbox files with optional catalog lookup and model enrichment, and then runs lint. Use `daily --apply --lookup --enrich` for the unattended new-file pipeline when catalog lookup and model enrichment are configured. Full-library maintenance remains explicit with `--maintain`. Dry-run remains non-mutating.
 
 `weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 

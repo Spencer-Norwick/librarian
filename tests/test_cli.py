@@ -230,6 +230,46 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertFalse(source.exists())
             self.assertTrue((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
 
+    def test_daily_dry_run_previews_scanned_inbox_ocr_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "BergerJohn_WaysOfSeeing_1972_book.pdf"
+            source.write_bytes(b"scanned pdf placeholder")
+
+            with patch("librarian.cli.extract_pdf", return_value=({}, "", [])):
+                code, output = self.run_cli(root, "daily")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Daily workflow: prepare inbox", output)
+            self.assertIn("[dry-run] OCR inbox PDF", output)
+            self.assertTrue(source.exists())
+            self.assertEqual(list((root / "_output" / "ocr").glob("*.pdf")), [])
+
+    def test_daily_apply_ocr_prepares_scanned_pdf_before_ingest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "BergerJohn_WaysOfSeeing_1972_book.pdf"
+            source.write_bytes(b"scanned pdf placeholder")
+            command = self.fake_ocr_command(root)
+
+            def fake_extract_pdf(path: Path):
+                if path.name == "BergerJohn_WaysOfSeeing_1972_book.pdf":
+                    return {}, "", []
+                return {}, "Seeing comes before words. This book develops an argument about images and visual culture.", []
+
+            with patch.dict(os.environ, {"LIBRARIAN_OCR_COMMAND": command}, clear=True):
+                with patch("librarian.cli.extract_pdf", side_effect=fake_extract_pdf):
+                    code, output = self.run_cli(root, "daily", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Prepared OCR inbox copy", output)
+            self.assertIn("Applied ingest for 1 file", output)
+            self.assertFalse(source.exists())
+            self.assertTrue((root / "_output" / "ocr" / "original-inbox-scans" / "BergerJohn_WaysOfSeeing_1972_book.pdf").exists())
+            self.assertTrue((root / "library" / "BergerJohn_WaysOfSeeing_1972_book.pdf").exists())
+
     def test_happy_path_ingest_enrich_weekly_and_reply_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
