@@ -6,10 +6,10 @@
   <string>local.reading-librarian.weekly</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/spencer/Desktop/Project/librarian/scripts/librarian-weekly-local.sh</string>
+    <string>/Users/spencer/librarian/scripts/librarian-weekly-local.sh</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/spencer/Desktop/Project/librarian</string>
+  <string>/Users/spencer/librarian</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
@@ -20,8 +20,8 @@
     <integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/Users/spencer/Desktop/Project/librarian/_state/launchd-weekly.out.log</string>
+  <string>/Users/spencer/librarian/_state/launchd-weekly.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/spencer/Desktop/Project/librarian/_state/launchd-weekly.err.log</string>
+  <string>/Users/spencer/librarian/_state/launchd-weekly.err.log</string>
 </dict>
 </plist>

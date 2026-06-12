@@ -6,10 +6,10 @@
   <string>local.reading-librarian.daily</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/spencer/Desktop/Project/librarian/scripts/librarian-daily.sh</string>
+    <string>/Users/spencer/librarian/scripts/librarian-daily.sh</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/spencer/Desktop/Project/librarian</string>
+  <string>/Users/spencer/librarian</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
@@ -18,8 +18,8 @@
     <integer>0</integer>
   </dict>
   <key>StandardOutPath</key>
-  <string>/Users/spencer/Desktop/Project/librarian/_state/launchd-daily.out.log</string>
+  <string>/Users/spencer/librarian/_state/launchd-daily.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/spencer/Desktop/Project/librarian/_state/launchd-daily.err.log</string>
+  <string>/Users/spencer/librarian/_state/launchd-daily.err.log</string>
 </dict>
 </plist>
