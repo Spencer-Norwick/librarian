@@ -1148,6 +1148,38 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(existing.read_bytes(), b"existing")
             self.assertEqual((root / "_output" / "ocr" / "ChiangTed_StoriesOfYourLife_2002_story_2.pdf").read_bytes(), source.read_bytes())
 
+    def test_ocr_apply_promote_preserves_original_and_rebuilds_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "Wallace_David_Foster_EUnibusPluram_1993_essay.pdf"
+            source.write_bytes(b"original scan")
+            entry = self.ready_entry(
+                author="Wallace, David Foster",
+                title="E Unibus Pluram",
+                filename=source.name,
+                next_action="needs_model",
+                primer_prompts=[],
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            def fake_extract_pdf(path: Path):
+                if path.name == source.name:
+                    return {}, "Television and U.S. fiction. This essay studies irony, spectatorship, image fiction, and literary culture.", []
+                return {}, "", []
+
+            with patch.dict(os.environ, {"LIBRARIAN_OCR_COMMAND": self.fake_ocr_command(root)}, clear=True):
+                with patch("librarian.cli.extract_pdf", side_effect=fake_extract_pdf):
+                    code, output = self.run_cli(root, "ocr", "E Unibus Pluram", "--apply", "--promote")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Promoted OCR copy", output)
+            self.assertTrue((root / "_output" / "ocr" / "original-library-files" / source.name).exists())
+            self.assertTrue(source.exists())
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].filename, source.name)
+            self.assertNotEqual(entries[0].next_action, "needs_ocr")
+
     def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

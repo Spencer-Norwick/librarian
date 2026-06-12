@@ -2467,9 +2467,15 @@ def command_ocr(args: argparse.Namespace, root: Path) -> int:
     for entry, source, target in plans:
         print(f"{prefix}OCR {entry.display_title}: {source.relative_to(root)} -> {target.relative_to(root)}")
 
+    if args.promote and not args.apply:
+        print("Promotion only runs with --apply; dry run will not replace library files.")
     if not args.apply:
         print("Dry run only. Re-run with --apply to write OCR copies under _output/ocr/.")
         return 0
+
+    if args.promote and args.enrich and not config.model_command:
+        print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
+        return 2
 
     if not config.ocr_command:
         print("OCR requires `ocr_command` in _state/config.toml or LIBRARIAN_OCR_COMMAND.")
@@ -2479,6 +2485,7 @@ def command_ocr(args: argparse.Namespace, root: Path) -> int:
         return 2
 
     changed = 0
+    entries_changed = False
     for entry, source, target in plans:
         target.parent.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
@@ -2495,8 +2502,27 @@ def command_ocr(args: argparse.Namespace, root: Path) -> int:
             continue
         changed += 1
         print(f"Wrote {target.relative_to(root)}.")
+        if args.promote:
+            promoted = promote_ocr_copy(config, source, target)
+            print(f"Promoted OCR copy to {promoted.relative_to(root)} and preserved original.")
+            repaired = infer_entry(promoted, config, use_catalog_lookup=args.lookup, use_model_enrichment=args.enrich)
+            repaired.filename = promoted.name
+            preserve_existing_state(repaired, entry)
+            entries = upsert_entry(entries, repaired)
+            entries_changed = True
+    if entries_changed:
+        write_index(config.index, entries)
     print(f"Applied OCR for {changed} entr{'y' if changed == 1 else 'ies'}.")
     return 0
+
+
+def promote_ocr_copy(config: Config, source: Path, ocr_copy: Path) -> Path:
+    original_dir = config.ocr_outputs / "original-library-files"
+    original_dir.mkdir(parents=True, exist_ok=True)
+    preserved = unique_path(original_dir / source.name)
+    move_without_overwrite(source, preserved)
+    move_without_overwrite(ocr_copy, source)
+    return source
 
 
 def extract_text_for_enrichment(path: Path) -> tuple[str, list[str]]:
@@ -3014,6 +3040,9 @@ def build_parser() -> argparse.ArgumentParser:
     ocr = sub.add_parser("ocr")
     ocr.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_ocr entries.")
     ocr.add_argument("--apply", action="store_true")
+    ocr.add_argument("--promote", action="store_true", help="Preserve the original library PDF and replace it with the OCR-searchable copy.")
+    ocr.add_argument("--lookup", action="store_true", help="Use catalog lookup when rebuilding promoted OCR metadata.")
+    ocr.add_argument("--enrich", action="store_true", help="Use configured model_command when rebuilding promoted OCR metadata.")
 
     weekly = sub.add_parser("weekly-pick")
     weekly.add_argument("--apply", action="store_true")
