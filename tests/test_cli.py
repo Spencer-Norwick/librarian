@@ -492,6 +492,47 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertIn("History: First time in the digest; never skipped.", output)
             self.assertIn("Primer prompt: What question does this work open?", output)
 
+    def test_digest_includes_compact_library_status_footer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entries = [
+                self.ready_entry(title="First", filename="BAuthor_First_2001_book.txt"),
+                self.ready_entry(title="Second", filename="BAuthor_Second_2002_book.txt"),
+                self.ready_entry(title="Read Work", filename="BAuthor_ReadWork_2003_book.txt", status="read"),
+            ]
+            (root / "library" / "index.md").write_text(render_index(entries), encoding="utf-8")
+
+            code, output = self.run_cli(root, "digest")
+
+            self.assertEqual(code, 0)
+            self.assertIn("-----\nLibrary status", output)
+            self.assertIn("Library: 3 works; 1 read; 2 unread; 0 skipped.", output)
+            self.assertIn("Ready queue: 2 unsent digest-ready works", output)
+            self.assertIn("Next after this: Second.", output)
+
+    def test_status_command_prints_library_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entries = [
+                self.ready_entry(title="First", filename="BAuthor_First_2001_book.txt"),
+                self.ready_entry(title="Read Work", filename="BAuthor_ReadWork_2003_book.txt", status="read"),
+                self.ready_entry(title="Needs Model", filename="BAuthor_NeedsModel_2004_book.txt", next_action="needs_model", primer_prompts=[]),
+            ]
+            (root / "library" / "index.md").write_text(render_index(entries), encoding="utf-8")
+            (root / "inbox" / "pending.pdf").write_bytes(b"pending")
+
+            code, output = self.run_cli(root, "status")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Library status", output)
+            self.assertIn("Total works: 3", output)
+            self.assertIn("Digest-ready: 1; unsent ready: 1", output)
+            self.assertIn("Inbox pending: 1", output)
+            self.assertIn("Review blockers: 1", output)
+            self.assertIn("Next weekly pick: First by B, Author", output)
+
     def test_weekly_defaults_to_notify_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

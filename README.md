@@ -45,6 +45,7 @@ librarian mount
 librarian mount --apply
 librarian daily
 librarian daily --apply
+librarian status
 librarian weekly
 librarian weekly --apply
 librarian ingest
@@ -87,6 +88,8 @@ See `docs/mount.md` for the human and agent setup runbook.
 See `docs/automation.md` for daily and weekly scheduler setup.
 
 `daily` is the automation-friendly daily workflow. It prepares scanned inbox PDFs with OCR when needed, ingests supported inbox files with optional catalog lookup and model enrichment, and then runs lint. Use `daily --apply --lookup --enrich` for the unattended new-file pipeline when catalog lookup and model enrichment are configured. Full-library maintenance remains explicit with `--maintain`. Dry-run remains non-mutating.
+
+`status` prints a compact snapshot of library size, read/unread counts, inbox pressure, review blockers, and the next weekly pick.
 
 `weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 

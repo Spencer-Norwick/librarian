@@ -119,6 +119,21 @@ class DigestPlan:
 
 
 @dataclass
+class LibraryStatus:
+    total: int
+    unread: int
+    read: int
+    skipped: int
+    digest_ready: int
+    unsent_ready: int
+    inbox_count: int
+    review_count: int
+    next_title: str
+    next_author: str
+    next_after_title: str
+
+
+@dataclass
 class DigestHistory:
     sent_count: int = 0
     last_sent: str = ""
@@ -371,6 +386,7 @@ librarian mount
 librarian mount --apply
 librarian daily
 librarian daily --apply
+librarian status
 librarian weekly
 librarian weekly --apply
 librarian ingest
@@ -413,6 +429,8 @@ See `docs/mount.md` for the human and agent setup runbook.
 See `docs/automation.md` for daily and weekly scheduler setup.
 
 `daily` is the automation-friendly daily workflow. It prepares scanned inbox PDFs with OCR when needed, ingests supported inbox files with optional catalog lookup and model enrichment, and then runs lint. Use `daily --apply --lookup --enrich` for the unattended new-file pipeline when catalog lookup and model enrichment are configured. Full-library maintenance remains explicit with `--maintain`. Dry-run remains non-mutating.
+
+`status` prints a compact snapshot of library size, read/unread counts, inbox pressure, review blockers, and the next weekly pick.
 
 `weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 
@@ -2513,7 +2531,8 @@ def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: b
     history = digest_history(config, pick)
     draft_name = f"{today()}_{normalize_filename(compact_pascal(pick.display_title) or 'Read')}.md"
     draft_path = unique_path(config.drafts / draft_name)
-    draft = digest_draft(pick, config.library / pick.filename, history)
+    status = build_library_status(config, entries, current_pick=pick)
+    draft = digest_draft(pick, config.library / pick.filename, history, status)
     return DigestPlan(pick, draft_path, draft, history)
 
 
@@ -2557,7 +2576,8 @@ def digest_blocker_line(entry: WorkEntry) -> str:
     return f"{title} ({entry.author}) is not digest-ready: {one_line('; '.join(review_reasons(entry)) or entry.next_action)}"
 
 
-def digest_draft(entry: WorkEntry, local_path: Path, history: DigestHistory) -> str:
+def digest_draft(entry: WorkEntry, local_path: Path, history: DigestHistory, status: LibraryStatus | None = None) -> str:
+    footer = f"\n{render_status_footer(status)}" if status else ""
     return f"""Subject: Read of the Week: {entry.display_title} by {entry.author}
 
 Title: {entry.display_title}
@@ -2577,7 +2597,67 @@ Primer prompts:
 
 Local file path:
 {local_path}
+{footer}
 """
+
+
+def build_library_status(config: Config, entries: list[WorkEntry], current_pick: WorkEntry | None = None) -> LibraryStatus:
+    ready = [entry for entry in entries if entry_digest_ready(entry)]
+    unsent_ready = [entry for entry in ready if entry.sent == "never"]
+    next_entry = sorted(unsent_ready, key=lambda item: (item.author_key, item.display_title.lower()))
+    display_next = current_pick or (next_entry[0] if next_entry else None)
+    future = [entry for entry in unsent_ready if display_next is None or entry.filename != display_next.filename]
+    future = sorted(future, key=lambda item: (item.author_key, item.display_title.lower()))
+    return LibraryStatus(
+        total=len(entries),
+        unread=sum(entry.status == "unread" for entry in entries),
+        read=sum(entry.status == "read" for entry in entries),
+        skipped=sum(entry.status == "skipped" for entry in entries),
+        digest_ready=len(ready),
+        unsent_ready=len(unsent_ready),
+        inbox_count=len(supported_files(config, config.inbox)),
+        review_count=sum(entry.status not in {"read", "skipped"} and not entry_digest_ready(entry) for entry in entries),
+        next_title=display_next.display_title if display_next else "None",
+        next_author=display_next.author if display_next else "",
+        next_after_title=future[0].display_title if future else "None",
+    )
+
+
+def render_status_footer(status: LibraryStatus) -> str:
+    return "\n".join(
+        [
+            "-----",
+            "Library status",
+            f"Library: {status.total} works; {status.read} read; {status.unread} unread; {status.skipped} skipped.",
+            f"Ready queue: {status.unsent_ready} unsent digest-ready works ({status.digest_ready} ready total).",
+            f"Inbox: {status.inbox_count} pending file{'s' if status.inbox_count != 1 else ''}; review blockers: {status.review_count}.",
+            f"Next after this: {status.next_after_title}.",
+        ]
+    )
+
+
+def render_status_summary(status: LibraryStatus) -> str:
+    next_line = status.next_title if not status.next_author else f"{status.next_title} by {status.next_author}"
+    return "\n".join(
+        [
+            "Library status",
+            f"Total works: {status.total}",
+            f"Read: {status.read}; unread: {status.unread}; skipped: {status.skipped}",
+            f"Digest-ready: {status.digest_ready}; unsent ready: {status.unsent_ready}",
+            f"Inbox pending: {status.inbox_count}",
+            f"Review blockers: {status.review_count}",
+            f"Next weekly pick: {next_line}",
+            f"Next after that: {status.next_after_title}",
+        ]
+    )
+
+
+def command_status(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    entries = read_index(config.index)
+    print(render_status_summary(build_library_status(config, entries)))
+    return 0
 
 
 def digest_history(config: Config, entry: WorkEntry) -> DigestHistory:
@@ -2961,6 +3041,7 @@ def build_parser() -> argparse.ArgumentParser:
     reply.add_argument("--email", action="store_true")
 
     sub.add_parser("list")
+    sub.add_parser("status")
 
     search = sub.add_parser("search")
     search.add_argument("query")
@@ -3008,6 +3089,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_ocr(args, root)
         if args.command == "list":
             return command_list(args, root)
+        if args.command == "status":
+            return command_status(args, root)
         if args.command == "search":
             return command_search(args, root)
         if args.command == "mark-read":
