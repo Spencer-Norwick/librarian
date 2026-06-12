@@ -2,6 +2,18 @@
 
 This project keeps automation thin. Scheduled jobs should call the CLI and let the CLI handle dry-run defaults, no-overwrite writes, logs, and index updates.
 
+## Finder Quick Action
+
+The local setup can install a Finder Quick Action named **Add to Librarian Inbox**. It sends selected supported files to `/Users/spencer/librarian/inbox` without changing the global Downloads folder.
+
+The Quick Action calls:
+
+```sh
+/Users/spencer/librarian/scripts/add-to-inbox.sh "$@"
+```
+
+Supported selected files are `.pdf`, `.epub`, `.txt`, `.md`, and `.docx`. Folders, symlinks, and unsupported files are skipped. Existing inbox filenames are never overwritten; a numeric suffix is added when needed.
+
 ## Recommended Jobs
 
 Daily ingest:

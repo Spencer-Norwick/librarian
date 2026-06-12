@@ -90,6 +90,8 @@ See `docs/automation.md` for daily and weekly scheduler setup.
 
 `weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
 
+For low-friction capture from Downloads, install the Finder Quick Action described in `docs/automation.md`. It appears as **Add to Librarian Inbox** and moves selected supported files into `inbox/` without overwriting existing files.
+
 `lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
 
 `reindex --apply` rebuilds `index.md` metadata for files already in `library/` while preserving each entry's status, sent date, and original filename when possible.
