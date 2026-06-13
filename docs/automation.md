@@ -22,7 +22,9 @@ Daily ingest:
 .venv/bin/librarian daily --apply --lookup --enrich
 ```
 
-This prepares scanned inbox PDFs with OCR when needed, ingests supported files from `inbox/`, updates `library/index.md`, and runs lint. Add `--lookup --enrich` after the user has chosen catalog lookup and model enrichment for unattended new-file operation. Use `--maintain` only for a deliberate full-library repair pass.
+This prepares scanned inbox PDFs with OCR when needed, ingests supported files from `inbox/`, updates `library/index.md`, and runs lint. When PDF text metadata is weak, the ingest path can locally render and OCR the first page to recover visible title-page metadata before using catalog lookup or model enrichment. Add `--lookup --enrich` after the user has chosen catalog lookup and model enrichment for unattended new-file operation. Use `--maintain` only for a deliberate full-library repair pass.
+
+Daily and weekly runs end with a compact summary showing library size, digest-ready count, inbox count, review blockers, unsent ready works, and the next weekly pick.
 
 Weekly digest:
 

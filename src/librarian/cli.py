@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.parse
 import urllib.request
@@ -669,6 +670,9 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
     if path.suffix.lower() == ".pdf":
         metadata, text, pdf_review = extract_pdf(path)
         review.extend(pdf_review)
+        visual_text = pdf_title_page_ocr_text(path) if pdf_needs_visual_title_fallback(path, metadata, text) else ""
+        if visual_text:
+            text = merge_front_matter_text(visual_text, text)
     elif path.suffix.lower() in {".txt", ".md"}:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -804,6 +808,79 @@ def extract_pdf(path: Path) -> tuple[dict[str, str], str, list[str]]:
     except Exception as exc:
         review.append(f"PDF extraction failed: {exc}")
     return metadata, "\n".join(text_parts), review
+
+
+def pdf_needs_visual_title_fallback(path: Path, metadata: dict[str, str], text: str) -> bool:
+    if path.suffix.lower() != ".pdf":
+        return False
+    if useful_pdf_title(metadata.get("title", "")):
+        return False
+    identity = infer_identity_from_front_matter(text)
+    guessed = infer_from_name(path.stem)
+    guessed_title = clean_title(guessed.get("title") or path.stem)
+    if identity.get("title") and identity.get("author"):
+        return False
+    if guessed_title in {"Untitled", "Unknown"}:
+        return True
+    if re.fullmatch(r"[a-f0-9]{16,}", normalize_lookup_text(guessed_title).replace(" ", "")):
+        return True
+    if clean_author(guessed.get("author", "Unknown")) == "Unknown":
+        return True
+    return False
+
+
+def merge_front_matter_text(front_text: str, body_text: str) -> str:
+    front = front_text.strip()
+    body = body_text.strip()
+    if not front:
+        return body_text
+    if not body:
+        return front
+    if normalize_lookup_text(front) and normalize_lookup_text(front) in normalize_lookup_text(body[:2000]):
+        return body_text
+    return f"{front}\n{body_text}"
+
+
+def pdf_title_page_ocr_text(path: Path) -> str:
+    if not command_available("qlmanage") or not command_available("tesseract"):
+        return ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="librarian-title-page-") as tmp:
+            output_dir = Path(tmp)
+            rendered = render_pdf_title_page(path, output_dir)
+            if not rendered:
+                return ""
+            completed = subprocess.run(
+                ["tesseract", str(rendered), "stdout"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if completed.returncode != 0:
+                return ""
+            return completed.stdout.strip()
+    except Exception:
+        return ""
+
+
+def render_pdf_title_page(path: Path, output_dir: Path) -> Path | None:
+    before = {item.name for item in output_dir.iterdir()} if output_dir.exists() else set()
+    completed = subprocess.run(
+        ["qlmanage", "-t", "-s", "1600", "-o", str(output_dir), str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        return None
+    candidates = [item for item in output_dir.iterdir() if item.name not in before and item.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+    if not candidates:
+        candidates = [item for item in output_dir.iterdir() if item.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+    return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[0] if candidates else None
 
 
 def infer_from_name(stem: str) -> dict[str, str]:
@@ -2069,6 +2146,8 @@ def build_inbox_preparation_plan(config: Config, use_catalog_lookup: bool = Fals
 def command_daily(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
+    before_entries = read_index(config.index)
+    before_inbox = len(supported_files(config, config.inbox))
     auto_lookup = args.lookup or config.use_catalog_lookup
     auto_enrich = args.enrich or config.use_model_assistance
     if auto_enrich and not config.model_command:
@@ -2101,7 +2180,29 @@ def command_daily(args: argparse.Namespace, root: Path) -> int:
             return maintain_code
 
     print("Daily workflow: lint")
-    return command_lint(argparse.Namespace(apply=False), root)
+    lint_code = command_lint(argparse.Namespace(apply=False), root)
+    if lint_code == 0:
+        after_entries = read_index(config.index)
+        print(render_run_summary("Daily summary", config, before_entries, after_entries, before_inbox))
+    return lint_code
+
+
+def render_run_summary(label: str, config: Config, before_entries: list[WorkEntry], after_entries: list[WorkEntry], before_inbox: int | None = None) -> str:
+    before_names = {entry.filename for entry in before_entries}
+    after_names = {entry.filename for entry in after_entries}
+    added = len(after_names - before_names)
+    before_ready = sum(entry_digest_ready(entry) for entry in before_entries)
+    after_status = build_library_status(config, after_entries)
+    ready_delta = after_status.digest_ready - before_ready
+    inbox_part = f"; inbox {before_inbox}->{after_status.inbox_count}" if before_inbox is not None else f"; inbox {after_status.inbox_count}"
+    return "\n".join(
+        [
+            label,
+            f"Works: {len(before_entries)}->{len(after_entries)} ({added} added); digest-ready {before_ready}->{after_status.digest_ready} ({ready_delta:+d}){inbox_part}.",
+            f"Review blockers: {after_status.review_count}; unsent ready: {after_status.unsent_ready}.",
+            f"Next weekly pick: {after_status.next_title if not after_status.next_author else after_status.next_title + ' by ' + after_status.next_author}.",
+        ]
+    )
 
 
 def command_repair(args: argparse.Namespace, root: Path) -> int:
@@ -2428,6 +2529,7 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
     entries = read_index(config.index)
+    before_entries = [replace_entry(entry) for entry in entries]
     plan = build_digest_plan(config, entries, allow_repeats=args.allow_repeats)
 
     if not plan:
@@ -2475,7 +2577,29 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     if args.email:
         print("Sent digest email.")
     run_local_delivery(config, plan, root, args)
+    print(render_run_summary("Weekly summary", config, before_entries, entries))
     return 0
+
+
+def replace_entry(entry: WorkEntry) -> WorkEntry:
+    return WorkEntry(
+        author=entry.author,
+        title=entry.title,
+        year=entry.year,
+        work_type=entry.work_type,
+        filename=entry.filename,
+        original_filename=entry.original_filename,
+        status=entry.status,
+        sent=entry.sent,
+        reading_time=entry.reading_time,
+        summary=entry.summary,
+        primer_prompts=list(entry.primer_prompts),
+        tags=list(entry.tags),
+        related=entry.related,
+        needs_review=list(entry.needs_review),
+        next_action=entry.next_action,
+        added=entry.added,
+    )
 
 
 def command_reply(args: argparse.Namespace, root: Path) -> int:

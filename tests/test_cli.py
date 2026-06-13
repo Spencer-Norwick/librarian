@@ -227,6 +227,9 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Applied ingest for 1 file", output)
             self.assertIn("No lint issues found.", output)
+            self.assertIn("Daily summary", output)
+            self.assertIn("Works: 0->1 (1 added)", output)
+            self.assertIn("Review blockers:", output)
             self.assertFalse(source.exists())
             self.assertTrue((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
 
@@ -393,6 +396,27 @@ class LibrarianCliTests(unittest.TestCase):
             entries = read_index(root / "library" / "index.md")
             self.assertEqual(entries[0].year, "1958")
             self.assertTrue((root / "library" / "Unknown_OppressionAndLiberty_1958_book.txt").exists())
+
+    def test_ingest_uses_visual_pdf_title_page_ocr_for_weak_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "d915f1d3f5b3da7daf4305874403f888.pdf"
+            source.write_bytes(b"%PDF-1.4 visual title page fixture")
+
+            with patch("librarian.cli.extract_pdf", return_value=({}, "Leonard Koren, (Berkeley: Stone Bridge Press) 2003", [])):
+                with patch(
+                    "librarian.cli.pdf_title_page_ocr_text",
+                    return_value="Arranging Things\nA Rhetoric of Object Placement\nLeonard Koren",
+                ):
+                    code, _ = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 0)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].author, "Koren, Leonard")
+            self.assertEqual(entries[0].title, "Arranging Things A Rhetoric of Object Placement")
+            self.assertEqual(entries[0].year, "2003")
+            self.assertTrue((root / "library" / "KorenLeonard_ArrangingThingsARhetoricOfObjectPlacement_2003_unknown.pdf").exists())
 
     def test_ingest_infers_title_page_identity_for_opaque_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -562,6 +586,8 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertNotIn("[dry-run] Digest pick", output)
             self.assertNotIn("[dry-run] Draft path", output)
             self.assertIn("Wrote _output/weekly-read-drafts", output)
+            self.assertIn("Weekly summary", output)
+            self.assertIn("unsent ready:", output)
             entries = read_index(root / "library" / "index.md")
             self.assertEqual(entries[0].sent, today())
             self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 1)
