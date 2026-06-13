@@ -35,10 +35,11 @@ This writes one weekly draft, marks the selected work sent, and appends `_state/
 Low-friction local delivery:
 
 ```bash
+.venv/bin/librarian daily --apply --lookup --enrich
 .venv/bin/librarian weekly --apply --notify-mac --open --message-self
 ```
 
-This writes the weekly draft, posts a macOS notification, opens the local reading file, and sends the title, summary, first prompt, and draft path through Messages. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
+For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then writes the weekly draft, posts a macOS notification, opens the local reading file, and sends the title, summary, first prompt, and draft path through Messages. This keeps the weekly pick fresh when the Mac was asleep or closed at earlier scheduled times. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
 
 ## Preview Commands
 
@@ -53,6 +54,7 @@ Expected safe output:
 
 - `daily` reports OCR preparation, pending inbox moves, and lint status, or says no supported files were found.
 - `weekly` prints a notification preview and draft body without writing a draft or sent state.
+- The launchd weekly script intentionally runs daily first; if daily fails, weekly stops instead of choosing from stale or inconsistent state.
 
 ## Reply Commands
 

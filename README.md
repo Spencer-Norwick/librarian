@@ -259,12 +259,13 @@ The CLI does not install scheduled jobs automatically.
 
 The recommended automation commands are documented in `docs/automation.md`.
 
+The weekly job should run the daily pipeline first so a laptop wake-up after missed schedules still ingests and repairs new inbox files before choosing the weekly read.
+
 ### cron
 
 ```cron
-0 8 * * * cd /path/to/reading-librarian && librarian daily --apply
-0 9 * * 1 cd /path/to/reading-librarian && librarian lint
-0 10 * * 1 cd /path/to/reading-librarian && librarian weekly --apply
+0 8 * * * cd /path/to/reading-librarian && librarian daily --apply --lookup --enrich
+0 10 * * 1 cd /path/to/reading-librarian && librarian daily --apply --lookup --enrich && librarian weekly --apply
 ```
 
 ### macOS launchd
