@@ -1180,6 +1180,127 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].filename, source.name)
             self.assertNotEqual(entries[0].next_action, "needs_ocr")
 
+    def test_repair_dry_run_lists_current_blockers_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            blocker = WorkEntry(
+                author="B, Author",
+                title="Needs Model",
+                filename="BAuthor_NeedsModel_2001_essay.txt",
+                summary="Needs Model",
+                next_action="needs_model",
+            )
+            ready = self.ready_entry(title="Ready", filename="BAuthor_Ready_2002_book.txt")
+            (root / "library" / blocker.filename).write_text("A focused essay about attention and tools.", encoding="utf-8")
+            (root / "library" / ready.filename).write_text("Already ready.", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([blocker, ready]), encoding="utf-8")
+            before = (root / "library" / "index.md").read_text(encoding="utf-8")
+
+            code, output = self.run_cli(root, "repair")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] Repair 1 entry", output)
+            self.assertIn("REVIEW", output)
+            self.assertIn("Dry run only", output)
+            self.assertEqual((root / "library" / "index.md").read_text(encoding="utf-8"), before)
+
+    def test_repair_lookup_hardens_front_matter_byline_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "Norman-TheDesignOfEverydayThings.txt"
+            source.write_text(
+                "\n".join(
+                    [
+                        "The Design of Everyday Things",
+                        "by Don Norman",
+                        "First published 1988",
+                        "Contents",
+                        "This book studies affordances, constraints, mappings, and the psychology of everyday action.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            old = WorkEntry(author="Unknown", title="Norman The Design Of Everyday Things", filename=source.name, next_action="needs_catalog")
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "repair", "Norman", "--apply", "--lookup")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied metadata repair", output)
+            repaired = root / "library" / "NormanDon_TheDesignOfEverydayThings_1988_book.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].author, "Norman, Don")
+            self.assertEqual(entries[0].title, "The Design of Everyday Things")
+            self.assertEqual(entries[0].year, "1988")
+
+    def test_repair_ocr_promotes_matching_scanned_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "ChiangTed_StoriesOfYourLife_2002_story.pdf"
+            source.write_bytes(b"original scan")
+            entry = self.ready_entry(
+                author="Chiang, Ted",
+                title="Stories Of Your Life",
+                filename=source.name,
+                next_action="needs_ocr",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            def fake_extract_pdf(path: Path):
+                if path.name == source.name:
+                    return {}, "Stories of Your Life Ted Chiang 2002 This story has extractable text after OCR.", []
+                return {}, "", []
+
+            with patch.dict(os.environ, {"LIBRARIAN_OCR_COMMAND": self.fake_ocr_command(root)}, clear=True):
+                with patch("librarian.cli.extract_pdf", side_effect=fake_extract_pdf):
+                    code, output = self.run_cli(root, "repair", "Stories", "--apply", "--ocr")
+
+            self.assertEqual(code, 0)
+            self.assertIn("OCR/promote", output)
+            self.assertIn("Promoted OCR copy", output)
+            self.assertTrue((root / "_output" / "ocr" / "original-library-files" / source.name).exists())
+            entries = read_index(root / "library" / "index.md")
+            self.assertNotEqual(entries[0].next_action, "needs_ocr")
+
+    def test_repair_enriches_only_selected_matching_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            command = self.fake_model_command(root)
+            selected = WorkEntry(
+                author="B, Author",
+                title="Selected",
+                filename="BAuthor_Selected_2001_essay.txt",
+                summary="Selected",
+                next_action="needs_model",
+                original_filename="BAuthor_Selected_2001_essay.txt",
+            )
+            other = WorkEntry(
+                author="C, Author",
+                title="Other",
+                filename="CAuthor_Other_2002_essay.txt",
+                summary="Other",
+                next_action="needs_model",
+                original_filename="CAuthor_Other_2002_essay.txt",
+            )
+            (root / "library" / selected.filename).write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            (root / "library" / other.filename).write_text("This essay also needs model help but was not selected.", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([selected, other]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "repair", "Selected", "--apply", "--enrich")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied enrichment for 1 entry", output)
+            entries = {entry.title: entry for entry in read_index(root / "library" / "index.md")}
+            self.assertEqual(entries["Selected"].next_action, "clean")
+            self.assertEqual(entries["Other"].next_action, "needs_model")
+
     def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -387,6 +387,7 @@ librarian mount --apply
 librarian daily
 librarian daily --apply
 librarian status
+librarian repair
 librarian weekly
 librarian weekly --apply
 librarian ingest
@@ -442,7 +443,7 @@ See `docs/automation.md` for daily and weekly scheduler setup.
 
 `ocr` is the local scanned-PDF repair bridge. It previews entries marked `needs_ocr` by default. With `--apply`, it runs the configured `ocr_command` and writes a no-overwrite OCR copy to `_output/ocr/` for review; it does not replace or delete library files.
 
-`maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
+`repair` is the targeted blocker workflow. It previews existing non-digest-ready entries and can apply OCR promotion, catalog lookup, and model enrichment with `--ocr`, `--lookup`, and `--enrich`. `maintain` remains the broader full-library repair workflow.
 
 `digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
 
@@ -686,8 +687,10 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
     if should_use_text_title(guessed_title, guessed.get("author", ""), text_identity.get("title", "")):
         guessed_title = text_identity["title"]
     title_source = metadata.get("title") if useful_pdf_title(metadata.get("title", "")) else ""
-    title = clean_title(title_source or guessed_title)
     author = choose_author(guessed.get("author", ""), metadata.get("author", ""), text_author)
+    if not title_source and text_identity.get("title") and clean_author(guessed.get("author", "Unknown")) == "Unknown" and author != "Unknown":
+        guessed_title = text_identity["title"]
+    title = clean_title(title_source or guessed_title)
     title = remove_author_prefix_from_title(title, author)
     year = first_known_year(metadata.get("year", ""), guessed.get("year", ""), infer_year_from_text(text))
     if use_catalog_lookup and should_lookup_catalog(title, author, year):
@@ -955,8 +958,15 @@ def infer_author_from_text(text: str, surname_hint: str) -> str:
 
 def infer_identity_from_front_matter(text: str) -> dict[str, str]:
     lines = front_matter_lines(text)
-    for index, line in enumerate(lines[:25]):
-        if not probable_person_name_line(line):
+    for index, line in enumerate(lines[:30]):
+        by_match = re.match(r"(?i)^by\s+(.+)$", line)
+        if by_match:
+            title = front_matter_title_before(lines, index)
+            author = normalize_author_candidate(by_match.group(1))
+            if title and author:
+                return {"title": title, "author": author}
+    for index, line in enumerate(lines[:30]):
+        if not probable_author_line(line):
             continue
         title = front_matter_title_before(lines, index)
         author = normalize_author_candidate(line)
@@ -996,14 +1006,20 @@ def front_matter_noise_line(line: str) -> bool:
 
 
 def probable_person_name_line(line: str) -> bool:
+    return probable_author_line(line, require_uppercase=True)
+
+
+def probable_author_line(line: str, require_uppercase: bool = False) -> bool:
     words = re.findall(r"[A-Za-z'.]+", line)
     if not 2 <= len(words) <= 4:
         return False
-    if line != line.upper():
+    if require_uppercase and line != line.upper():
         return False
     lower = line.lower()
-    blocked = {"contents", "preface", "chapter", "press", "university", "library", "inc", "hall"}
-    return not any(word.lower().strip(".'") in blocked for word in words) and " and " not in lower
+    blocked = {"contents", "preface", "chapter", "press", "university", "library", "inc", "hall", "book", "design", "thinking", "things"}
+    if any(word.lower().strip(".'") in blocked for word in words) or " and " in lower:
+        return False
+    return all(word[:1].isupper() for word in words if word)
 
 
 def front_matter_title_before(lines: list[str], author_index: int) -> str:
@@ -1033,7 +1049,11 @@ def should_use_text_title(guessed_title: str, guessed_author: str, text_title: s
         return True
     if re.fullmatch(r"[a-f0-9]{16,}", compact_key):
         return True
-    return clean_author(guessed_author or "Unknown") == "Unknown" and title_key.startswith("unknown ")
+    if clean_author(guessed_author or "Unknown") == "Unknown" and title_key.startswith("unknown "):
+        return True
+    if clean_author(guessed_author or "Unknown") == "Unknown" and any(sep in guessed_title for sep in ["-", "_"]):
+        return True
+    return False
 
 
 def choose_author(guessed_author: str, metadata_author: str, text_author: str) -> str:
@@ -2084,6 +2104,156 @@ def command_daily(args: argparse.Namespace, root: Path) -> int:
     return command_lint(argparse.Namespace(apply=False), root)
 
 
+def command_repair(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    if args.enrich and not config.model_command:
+        print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
+        return 2
+
+    entries = read_index(config.index)
+    selected = match_entries(entries, args.query) if args.query else repair_candidates(entries)
+    if not selected:
+        print("No entries matched repair criteria.")
+        return 0
+
+    action_prefix = "[dry-run]" if not args.apply else "[apply]"
+    print(f"{action_prefix} Repair {len(selected)} entr{'y' if len(selected) == 1 else 'ies'}.")
+    selected_names = {entry.filename for entry in selected}
+
+    if args.ocr:
+        for entry in selected:
+            if entry.next_action == "needs_ocr":
+                print(f"{action_prefix} OCR/promote: {entry.filename}")
+
+    metadata_plan = build_targeted_metadata_repair_plan(config, selected_names, use_catalog_lookup=args.lookup)
+    rename_sources = {rename.source_name for rename in metadata_plan.renames}
+    rename_targets = {rename.target_name for rename in metadata_plan.renames}
+    preview_names = (selected_names - rename_sources) | rename_targets
+    for rename in metadata_plan.renames:
+        print(f"{action_prefix} RENAME: {rename.source_name} -> {rename.target_name}")
+    for entry in sorted(metadata_plan.entries, key=lambda item: (item.author_key, item.display_title.lower())):
+        if entry.filename in preview_names and entry_needs_review(entry):
+            print(f"{action_prefix} REVIEW {entry.next_action}: {entry.filename} — {entry.author} — {entry.display_title}: {'; '.join(review_reasons(entry))}")
+
+    if args.enrich:
+        for entry in selected:
+            if entry.next_action == "needs_model" or not entry.primer_prompts or not usable_digest_summary(entry):
+                print(f"{action_prefix} ENRICH: {entry.filename}")
+
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to repair matching entries.")
+        return 0
+
+    if args.ocr:
+        for entry in list(selected):
+            if entry.next_action == "needs_ocr":
+                code = command_ocr(
+                    argparse.Namespace(query=entry.filename, apply=True, promote=True, lookup=args.lookup, enrich=False),
+                    root,
+                )
+                if code:
+                    return code
+        entries = read_index(config.index)
+        selected = [entry for entry in entries if entry.filename in selected_names or (args.query and match_entries([entry], args.query))]
+        selected_names = {entry.filename for entry in selected}
+
+    if args.lookup:
+        metadata_plan = build_targeted_metadata_repair_plan(config, selected_names, use_catalog_lookup=True)
+        rename_sources = {rename.source_name for rename in metadata_plan.renames}
+        rename_targets = {rename.target_name for rename in metadata_plan.renames}
+        for rename in metadata_plan.renames:
+            move_without_overwrite(config.library / rename.source_name, config.library / rename.target_name)
+        write_index(config.index, metadata_plan.entries)
+        print(f"Applied metadata repair: {len(metadata_plan.renames)} rename(s).")
+        entries = read_index(config.index)
+        selected_names = (selected_names - rename_sources) | rename_targets
+        selected = [entry for entry in entries if entry.filename in selected_names]
+
+    if args.enrich:
+        changed = apply_targeted_enrichment(config, selected)
+        if changed:
+            entries = read_index(config.index)
+            by_filename = {entry.filename: entry for entry in entries}
+            for enriched in changed:
+                if enriched.filename in by_filename:
+                    by_filename[enriched.filename].summary = enriched.summary
+                    by_filename[enriched.filename].primer_prompts = enriched.primer_prompts
+                    by_filename[enriched.filename].tags = enriched.tags
+                    by_filename[enriched.filename].related = enriched.related
+                    by_filename[enriched.filename].next_action = enriched.next_action
+            write_index(config.index, entries)
+        print(f"Applied enrichment for {len(changed)} entr{'y' if len(changed) == 1 else 'ies'}.")
+
+    print("Repair complete.")
+    return command_lint(argparse.Namespace(apply=False), root)
+
+
+def repair_candidates(entries: list[WorkEntry]) -> list[WorkEntry]:
+    return [entry for entry in entries if entry.status not in {"read", "skipped"} and not entry_digest_ready(entry)]
+
+
+def build_targeted_metadata_repair_plan(config: Config, filenames: set[str], use_catalog_lookup: bool = False) -> MaintenancePlan:
+    existing_entries = {entry.filename: entry for entry in read_index(config.index)}
+    library_files = library_reading_files(config)
+    reserved = {path.name for path in library_files}
+    rebuilt: list[WorkEntry] = []
+    renames: list[RenamePlan] = []
+
+    for path in library_files:
+        old = existing_entries.get(path.name)
+        if path.name not in filenames:
+            if old:
+                rebuilt.append(old)
+            continue
+        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=False)
+        if old:
+            preserve_existing_state(entry, old)
+            if old.next_action == "clean" and entry_needs_review(entry):
+                preserve_existing_semantics(entry, old)
+        desired_name = make_filename(entry, config, path.suffix.lower())
+        if should_repair_filename(path.name, entry, desired_name):
+            target_name = unique_filename(config.library, desired_name, path, reserved - {path.name})
+            if target_name != path.name:
+                renames.append(RenamePlan(path.name, target_name))
+                entry.filename = target_name
+                reserved.discard(path.name)
+                reserved.add(target_name)
+            else:
+                entry.filename = path.name
+        else:
+            entry.filename = path.name
+        rebuilt.append(entry)
+
+    return MaintenancePlan(rebuilt, renames)
+
+
+def apply_targeted_enrichment(config: Config, entries: list[WorkEntry]) -> list[WorkEntry]:
+    changed: list[WorkEntry] = []
+    for entry in entries:
+        if entry.status in {"read", "skipped"}:
+            continue
+        if entry.next_action != "needs_model" and entry.primer_prompts and usable_digest_summary(entry):
+            continue
+        path = config.library / entry.filename
+        text, review = extract_text_for_enrichment(path)
+        if review:
+            print(f"SKIP {entry.filename}: {'; '.join(review)}")
+            continue
+        attempt = try_enrich_from_model(config, entry, text)
+        enrichment = attempt.enrichment
+        if not enrichment:
+            print(f"SKIP {entry.filename}: {attempt.reason}.")
+            continue
+        entry.summary = enrichment.summary
+        entry.primer_prompts = enrichment.primer_prompts
+        entry.tags = dedupe(entry.tags + enrichment.tags)[:6]
+        entry.related = enrichment.related or entry.related
+        entry.next_action = "clean"
+        changed.append(entry)
+    return changed
+
+
 def command_weekly(args: argparse.Namespace, root: Path) -> int:
     return command_digest(
         argparse.Namespace(
@@ -3024,6 +3194,13 @@ def build_parser() -> argparse.ArgumentParser:
     daily.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
     daily.add_argument("--maintain", action="store_true", help="Also run the full library maintenance pass.")
 
+    repair = sub.add_parser("repair")
+    repair.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to current review blockers.")
+    repair.add_argument("--apply", action="store_true")
+    repair.add_argument("--ocr", action="store_true", help="OCR and promote entries marked needs_ocr.")
+    repair.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
+    repair.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich semantic metadata.")
+
     weekly = sub.add_parser("weekly")
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
@@ -3104,6 +3281,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_maintain(args, root)
         if args.command == "daily":
             return command_daily(args, root)
+        if args.command == "repair":
+            return command_repair(args, root)
         if args.command == "weekly":
             return command_weekly(args, root)
         if args.command == "weekly-pick":
