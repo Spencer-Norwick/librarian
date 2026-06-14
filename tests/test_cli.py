@@ -4,12 +4,25 @@ import io
 import json
 import os
 import tempfile
+import tomllib
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from librarian.cli import WorkEntry, clean_title, filename_convention_ok, infer_year_from_text, main, read_index, render_index, today
+from librarian.cli import (
+    WorkEntry,
+    agents_markdown,
+    clean_title,
+    filename_convention_ok,
+    infer_year_from_text,
+    main,
+    read_index,
+    readme_markdown,
+    render_index,
+    today,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -67,9 +80,51 @@ class LibrarianCliTests(unittest.TestCase):
         )
         return f"python3 {script}"
 
+    def write_epub(self, path: Path, body: str) -> None:
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("mimetype", "application/epub+zip")
+            archive.writestr(
+                "OPS/chapter.xhtml",
+                f"""<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body><p>{body}</p></body>
+</html>
+""",
+            )
+
+    def write_docx(self, path: Path, paragraphs: list[str]) -> None:
+        body = "".join(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>" for text in paragraphs)
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "word/document.xml",
+                f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>{body}</w:body>
+</w:document>
+""",
+            )
+
     def test_sample_fixture_dirs_live_under_tests(self) -> None:
         self.assertTrue((FIXTURES / "inbox").is_dir())
         self.assertTrue((FIXTURES / "library").is_dir())
+
+    def test_init_document_templates_follow_public_docs(self) -> None:
+        root = FIXTURES.parents[1]
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertEqual(readme_markdown(), readme)
+        self.assertEqual(agents_markdown(), agents)
+        self.assertIn("librarian weekly --apply --notify-mac --open --message-self", readme)
+        self.assertIn(".epub` and `.docx`: ingest plus lightweight stdlib text extraction", readme)
+
+    def test_package_keeps_librarian_command_and_alias(self) -> None:
+        root = FIXTURES.parents[1]
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        scripts = pyproject["project"]["scripts"]
+
+        self.assertEqual(scripts["librarian"], "librarian.cli:main")
+        self.assertEqual(scripts["reading-librarian"], "librarian.cli:main")
 
     def test_mount_check_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -198,6 +253,44 @@ class LibrarianCliTests(unittest.TestCase):
             log_text = (root / "_state" / "ingest-log.md").read_text(encoding="utf-8")
             self.assertIn("`Ong_Walter_OralityAndLiteracy_1982_book.txt`", log_text)
             self.assertIn("`OngWalter_OralityAndLiteracy_1982_book.txt`", log_text)
+
+    def test_ingest_epub_extracts_text_without_ocr_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "Ong_Walter_OralityAndLiteracy_1982_book.epub"
+            self.write_epub(source, "Writing restructures consciousness. This book examines orality and literacy.")
+
+            code, output = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("Text extraction not implemented", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].filename, "OngWalter_OralityAndLiteracy_1982_book.epub")
+            self.assertEqual(entries[0].next_action, "needs_model")
+            self.assertNotIn("Text extraction not implemented", entries[0].needs_review)
+            self.assertNotEqual(entries[0].next_action, "needs_ocr")
+            self.assertIn("Writing restructures consciousness.", entries[0].summary)
+
+    def test_ingest_docx_extracts_text_without_ocr_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "LeGuin_Ursula_CarrierBagTheory_1986_essay.docx"
+            self.write_docx(
+                source,
+                ["The carrier bag theory reframes technology around gathering and holding.", "It is an essay about stories."],
+            )
+
+            code, output = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertNotIn("Text extraction not implemented", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].filename, "LeGuinUrsula_CarrierBagTheory_1986_essay.docx")
+            self.assertEqual(entries[0].next_action, "needs_model")
+            self.assertNotEqual(entries[0].next_action, "needs_ocr")
+            self.assertIn("carrier bag theory reframes technology", entries[0].summary)
 
     def test_daily_dry_run_does_not_move_inbox_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

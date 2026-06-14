@@ -1,8 +1,41 @@
 # Reading Librarian
 
-A small, (mostly) local, flat-file CLI for managing a reading backlog.
+Reading Librarian is a local-first CLI for people with messy folders of PDFs, EPUBs, essays, and saved texts who want a clean reading library without adopting a database-backed app.
 
-It ingests supported files from `inbox/`, proposes deterministic filenames, moves them into a flat `library/` folder with `--apply`, and maintains one human and agent-readable `library/index.md`.
+It keeps the shape deliberately simple: drop files into `inbox/`, preview deterministic filenames, apply the move into a flat `library/`, and keep one readable `library/index.md`.
+
+No database. No wiki. No author folders. No cloud account. Optional catalog lookup, OCR, model enrichment, local notifications, Messages delivery, and email stay behind explicit commands or local config.
+
+## Three-Step Workflow
+
+```bash
+librarian mount --check
+librarian ingest
+librarian ingest --apply
+```
+
+Then review the library:
+
+```bash
+librarian status
+librarian weekly
+```
+
+For this user's low-friction weekly flow, prefer local delivery over email:
+
+```bash
+librarian weekly --apply --notify-mac --open --message-self
+```
+
+## What It Is Not
+
+- Not an ebook reader.
+- Not a citation manager.
+- Not a document archive.
+- Not a cloud read-it-later service.
+- Not a database-backed media server.
+
+Calibre, Zotero, Paperless-ngx, Readwise Reader, Kavita, and Komga are better if you want reader UI, citations, household document management, SaaS sync, or a media server. Reading Librarian is for a narrower job: make a local reading backlog durable, scriptable, and easy to revisit.
 
 ## Install for Local Development
 
@@ -23,6 +56,16 @@ You can also run without installing:
 ```bash
 PYTHONPATH=src python3 -m librarian --help
 ```
+
+The installed command is `librarian`. The package also provides `reading-librarian` as a non-breaking alias for environments where the generic command name conflicts.
+
+## Supported Files
+
+Supported inbox extensions are `.pdf`, `.epub`, `.txt`, `.md`, and `.docx`.
+
+- `.pdf`: ingest plus local metadata/text extraction when `pypdf` is installed.
+- `.txt` and `.md`: ingest plus local text extraction.
+- `.epub` and `.docx`: ingest plus lightweight stdlib text extraction; entries are marked for review if extraction fails or metadata remains weak.
 
 ## Project Layout
 
@@ -68,7 +111,6 @@ librarian ocr
 librarian ocr "Title or filename" --apply
 librarian digest
 librarian digest --notify
-librarian digest --email --apply
 librarian weekly-pick
 librarian weekly-pick --apply
 librarian reply skip --apply
@@ -93,7 +135,7 @@ Daily and weekly commands print compact end-of-run summaries so launchd logs sho
 
 `status` prints a compact snapshot of library size, read/unread counts, inbox pressure, review blockers, and the next weekly pick.
 
-`weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
+`weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state. Add `--notify-mac --open --message-self` for local notification, opening the selected file, and sending yourself the digest through Messages when configured.
 
 For low-friction capture from Downloads, install the Finder Quick Action described in `docs/automation.md`. It appears as **Add to Librarian Inbox** and moves selected supported files into `inbox/` without overwriting existing files.
 
@@ -109,7 +151,7 @@ For low-friction capture from Downloads, install the Finder Quick Action describ
 
 `maintain` is the normal repair workflow. It previews safe filename repairs, rebuilds `index.md`, and reports the next action for remaining weak entries. It is dry-run by default.
 
-`digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
+`digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, and prints an automation-friendly notification with `--notify`. Email exists only as an explicit optional path with `--email --apply` after email environment variables or local config are set. `weekly-pick` remains as a compatibility alias.
 
 Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
 
@@ -126,7 +168,7 @@ librarian weekly --apply --notify-mac --open --message-self
 message_to = "you@example.com"
 ```
 
-`reply` is the command-line target for automation or email-reply handlers. It acts on the latest sent digest from `_state/sent-log.md`: `reply skip --apply` marks it skipped, `reply read --apply` marks it read, and `reply new --apply` marks it skipped and writes the next digest-ready draft. Like the rest of the tool, it previews by default.
+`reply` is the command-line target for automation handlers. It acts on the latest sent digest from `_state/sent-log.md`: `reply skip --apply` marks it skipped, `reply read --apply` marks it read, and `reply new --apply` marks it skipped and writes the next digest-ready draft. Like the rest of the tool, it previews by default.
 
 ## Metadata Pipeline
 
@@ -234,8 +276,11 @@ Ingest also reserves planned filenames before applying a batch, so two inbox fil
 - Symlinked inbox files are ignored.
 - No SQL, database, or wiki is used.
 - Model calls happen only when `--enrich`, `librarian enrich`, or `use_model_assistance = true` is configured.
+- Local notification, file opening, and Messages delivery happen only when explicitly requested.
 - Email is sent only when explicitly requested with `digest --email --apply` and configured through environment variables.
 - Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
+
+### Optional Email Delivery
 
 Email delivery uses Resend's HTTPS API without a required package dependency. Configure it with:
 
