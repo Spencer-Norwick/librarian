@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
+import html
 import json
 import os
 import re
@@ -14,230 +14,47 @@ import tempfile
 import tomllib
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+import zipfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-
-WORK_TYPES = {
-    "book",
-    "essay",
-    "article",
-    "paper",
-    "chapter",
-    "story",
-    "poem",
-    "letters",
-    "lecture",
-    "notes",
-    "unknown",
-}
-SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".txt", ".md", ".docx"}
-DEFAULT_TAGS = ["reading"]
-
-
-@dataclass
-class Config:
-    inbox: Path
-    library: Path
-    index: Path
-    state: Path
-    ingest_log: Path
-    sent_log: Path
-    status_log: Path
-    quarantine: Path
-    drafts: Path
-    ocr_outputs: Path
-    supported_extensions: set[str] = field(default_factory=lambda: set(SUPPORTED_EXTENSIONS))
-    reading_words_per_minute: int = 250
-    max_filename_stem_chars: int = 96
-    ocr_command: list[str] = field(default_factory=lambda: ["ocrmypdf", "--skip-text"])
-    use_catalog_lookup: bool = False
-    catalog_timeout_seconds: float = 5.0
-    use_model_assistance: bool = False
-    model_command: list[str] = field(default_factory=list)
-    model_max_input_chars: int = 12000
-    require_external_model_approval: bool = True
-    email_from: str = ""
-    email_to: str = ""
-    message_to: str = ""
-
-
-@dataclass
-class WorkEntry:
-    author: str = "Unknown"
-    title: str = "Untitled"
-    year: str = "nd"
-    work_type: str = "unknown"
-    filename: str = ""
-    original_filename: str = ""
-    status: str = "unread"
-    sent: str = "never"
-    reading_time: str = "~0m"
-    summary: str = "Needs review."
-    primer_prompts: list[str] = field(default_factory=list)
-    tags: list[str] = field(default_factory=lambda: list(DEFAULT_TAGS))
-    related: str = "None."
-    needs_review: list[str] = field(default_factory=list)
-    next_action: str = "clean"
-    added: str = ""
-
-    @property
-    def author_key(self) -> str:
-        return author_sort_key(self.author)
-
-    @property
-    def display_title(self) -> str:
-        return self.title or "Untitled"
-
-
-@dataclass
-class CatalogMatch:
-    title: str = ""
-    author: str = ""
-    year: str = ""
-    note: str = ""
-
-
-@dataclass
-class RenamePlan:
-    source_name: str
-    target_name: str
-
-
-@dataclass
-class MaintenancePlan:
-    entries: list[WorkEntry]
-    renames: list[RenamePlan]
-
-
-@dataclass
-class DigestPlan:
-    entry: WorkEntry
-    draft_path: Path
-    body: str
-    history: "DigestHistory"
-
-
-@dataclass
-class LibraryStatus:
-    total: int
-    unread: int
-    read: int
-    skipped: int
-    digest_ready: int
-    unsent_ready: int
-    inbox_count: int
-    review_count: int
-    next_title: str
-    next_author: str
-    next_after_title: str
-
-
-@dataclass
-class DigestHistory:
-    sent_count: int = 0
-    last_sent: str = ""
-    skip_count: int = 0
-
-
-@dataclass
-class ModelEnrichment:
-    summary: str = ""
-    primer_prompts: list[str] = field(default_factory=list)
-    tags: list[str] = field(default_factory=list)
-    related: str = ""
-
-
-@dataclass
-class ModelEnrichmentAttempt:
-    enrichment: ModelEnrichment | None = None
-    reason: str = ""
-
-
-@dataclass
-class MountRecommendation:
-    model_command: list[str]
-    model_note: str
-    digest_command: str
-    checks: list[tuple[str, str, str]]
-
-
-def project_config(root: Path) -> Config:
-    config_path = root / "_state" / "config.toml"
-    raw: dict = {}
-    if config_path.exists():
-        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
-
-    paths = raw.get("paths", {})
-    behavior = raw.get("behavior", {})
-    supported = behavior.get("supported_extensions", sorted(SUPPORTED_EXTENSIONS))
-
-    def p(key: str, default: str) -> Path:
-        return safe_project_path(root, paths.get(key, default))
-
-    state = p("state", "_state")
-    library = p("library", "library")
-    return Config(
-        inbox=p("inbox", "inbox"),
-        library=library,
-        index=p("index", "library/index.md"),
-        state=state,
-        ingest_log=p("ingest_log", "_state/ingest-log.md"),
-        sent_log=p("sent_log", "_state/sent-log.md"),
-        status_log=p("status_log", "_state/status-log.md"),
-        quarantine=p("quarantine", "_quarantine"),
-        drafts=p("weekly_read_drafts", "_output/weekly-read-drafts"),
-        ocr_outputs=p("ocr_outputs", "_output/ocr"),
-        supported_extensions={ext.lower() for ext in supported},
-        reading_words_per_minute=int(behavior.get("reading_words_per_minute", 250)),
-        max_filename_stem_chars=int(behavior.get("max_filename_stem_chars", 96)),
-        ocr_command=ocr_command(behavior.get("ocr_command", ["ocrmypdf", "--skip-text"])),
-        use_catalog_lookup=bool(behavior.get("use_catalog_lookup", False)),
-        catalog_timeout_seconds=float(behavior.get("catalog_timeout_seconds", 5.0)),
-        use_model_assistance=bool(behavior.get("use_model_assistance", False)),
-        model_command=model_command(behavior.get("model_command", [])),
-        model_max_input_chars=int(behavior.get("model_max_input_chars", 12000)),
-        require_external_model_approval=bool(behavior.get("require_external_model_approval", True)),
-        email_from=str(behavior.get("email_from", "")),
-        email_to=str(behavior.get("email_to", "")),
-        message_to=str(behavior.get("message_to", "")),
-    )
-
-
-def ensure_dirs(config: Config) -> None:
-    for path in [config.inbox, config.library, config.state, config.quarantine, config.drafts, config.ocr_outputs]:
-        path.mkdir(parents=True, exist_ok=True)
-
-
-def safe_project_path(root: Path, value: str) -> Path:
-    root = root.resolve()
-    candidate = (root / value).resolve()
-    if candidate != root and root not in candidate.parents:
-        raise ValueError(f"Configured path escapes project root: {value}")
-    return candidate
-
-
-def model_command(value: object) -> list[str]:
-    env_value = os.environ.get("LIBRARIAN_MODEL_COMMAND", "")
-    if env_value:
-        return shlex.split(env_value)
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return shlex.split(value)
-    return []
-
-
-def ocr_command(value: object) -> list[str]:
-    env_value = os.environ.get("LIBRARIAN_OCR_COMMAND", "")
-    if env_value:
-        return shlex.split(env_value)
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return shlex.split(value)
-    return ["ocrmypdf", "--skip-text"]
+from .config import ensure_dirs, project_config, sample_config
+from .domain import (
+    WORK_TYPES,
+    CatalogMatch,
+    Config,
+    DigestHistory,
+    DigestPlan,
+    LibraryStatus,
+    MaintenancePlan,
+    ModelEnrichment,
+    ModelEnrichmentAttempt,
+    MountRecommendation,
+    RenamePlan,
+    WorkEntry,
+    clean_work_type,
+)
+from .filesystem import (
+    move_without_overwrite,
+    supported_files,
+    unique_filename,
+    unique_path,
+    write_text_atomic,
+    write_text_without_overwrite,
+)
+from .filenames import compact_pascal, make_filename, normalize_filename
+from .index import (
+    entry_needs_review,
+    inline_code,
+    one_line,
+    read_index,
+    render_index,
+    review_reasons,
+    upsert_entry,
+    write_index,
+)
 
 
 def init_project(root: Path) -> int:
@@ -261,359 +78,16 @@ def write_if_missing(path: Path, content: str) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def sample_config() -> str:
-    return """[paths]
-inbox = "inbox"
-library = "library"
-index = "library/index.md"
-state = "_state"
-ingest_log = "_state/ingest-log.md"
-sent_log = "_state/sent-log.md"
-status_log = "_state/status-log.md"
-quarantine = "_quarantine"
-weekly_read_drafts = "_output/weekly-read-drafts"
-ocr_outputs = "_output/ocr"
-
-[behavior]
-supported_extensions = [".pdf", ".epub", ".txt", ".md", ".docx"]
-reading_words_per_minute = 250
-max_filename_stem_chars = 96
-ocr_command = ["ocrmypdf", "--skip-text"]
-use_model_assistance = false
-model_command = []
-model_max_input_chars = 12000
-require_external_model_approval = true
-use_catalog_lookup = false
-catalog_timeout_seconds = 5
-email_from = ""
-email_to = ""
-message_to = ""
-"""
-
-
 def pyproject_text() -> str:
     return Path(__file__).resolve().parents[2].joinpath("pyproject.toml").read_text(encoding="utf-8")
 
 
 def agents_markdown() -> str:
-    return """# AGENTS.md
-
-Project rules for this reading librarian:
-
-- Keep the project simple.
-- Do not add a database.
-- Do not create a wiki.
-- Do not send email unless the user explicitly invokes a configured email-sending command.
-- Do not delete files automatically.
-- Use dry-run by default for commands that modify files or Markdown.
-- Keep `library/index.md` clean, compact, stable, and readable.
-- Prefer deterministic file operations.
-- Use model calls only when they materially improve metadata, summaries, tags, or reading prompts.
-- Prefer local PDF/text metadata extraction before optional external catalog lookup.
-- Follow the metadata pipeline: filename parse, embedded metadata, local text extraction, catalog lookup for weak metadata, OCR for scanned content, then model help only for semantic enrichment.
-- Write tests for destructive-path behavior.
-- Preserve original filenames in `index.md` and `_state/ingest-log.md`.
-- Keep actual reading files directly in `library/`.
-- Keep sample/test reading files under `tests/fixtures/`, not root-level `*_test` folders.
-- Keep configured paths inside the project root; do not let config paths escape with absolute paths or `..`.
-- Never use overwrite-style writes for new library files or weekly draft files.
-- Reserve planned ingest filenames before moving files so same-batch collisions cannot overwrite.
-- Ignore symlinked inbox files unless there is a deliberate, reviewed reason to support them.
-- Keep `index.md` in the established heading and field format; update parser/lint tests when the format changes.
-
-Mount protocol for new users or forks:
-
-- Start with `librarian mount --check`.
-- Treat `librarian mount` as dry-run setup preview.
-- Write local config only with `librarian mount --apply`.
-- Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
-- Prefer `privacy=assisted` and `digest=notify`.
-- Before sending text excerpts to an external model, check `_state/config.toml` for `require_external_model_approval`; if it is missing or true, ask for explicit user approval.
-- If `require_external_model_approval = false`, the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
-- If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
-- The hook must read the librarian JSON payload from stdin and print the documented enrichment JSON to stdout.
-- Test model hooks with synthetic non-library text before asking to enrich real files.
-- Use `librarian ocr` for scanned-PDF repair; do not replace or delete library files automatically.
-- See `docs/mount.md` for the full human and agent runbook.
-- See `docs/automation.md` for daily, weekly, and reply automation setup.
-"""
+    return Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(encoding="utf-8")
 
 
 def readme_markdown() -> str:
-    return """# Reading Librarian
-
-A small local flat-file CLI for managing a reading backlog.
-
-It ingests supported files from `inbox/`, proposes deterministic filenames, moves them into a flat `library/` folder only with `--apply`, and maintains one human-readable `library/index.md`.
-
-## Install for Local Development
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e .
-```
-
-The MVP has no required runtime dependencies. Install `pypdf` only if you want local PDF metadata/text extraction:
-
-```bash
-python -m pip install -e '.[pdf]'
-```
-
-You can also run without installing:
-
-```bash
-PYTHONPATH=src python3 -m librarian --help
-```
-
-## Project Layout
-
-Runtime folders:
-
-- `inbox/`: files waiting to be ingested
-- `library/`: flat library files plus `index.md`
-- `_state/`: config and Markdown logs
-- `_quarantine/`: files needing manual review
-- `_output/weekly-read-drafts/`: generated weekly draft files
-
-Test/sample files live under `tests/fixtures/`. Do not put test inboxes or test libraries at the project root.
-
-## Commands
-
-```bash
-librarian init
-librarian mount --check
-librarian mount
-librarian mount --apply
-librarian daily
-librarian daily --apply
-librarian status
-librarian repair
-librarian weekly
-librarian weekly --apply
-librarian ingest
-librarian ingest --lookup
-librarian ingest --enrich --apply
-librarian ingest --apply
-librarian lint
-librarian lint --apply
-librarian reindex
-librarian reindex --lookup
-librarian reindex --enrich --apply
-librarian reindex --apply
-librarian maintain
-librarian maintain --lookup
-librarian maintain --enrich --apply
-librarian maintain --apply
-librarian enrich
-librarian enrich "Title or filename" --apply
-librarian ocr
-librarian ocr "Title or filename" --apply
-librarian digest
-librarian digest --notify
-librarian digest --email --apply
-librarian weekly-pick
-librarian weekly-pick --apply
-librarian reply skip --apply
-librarian reply read --apply
-librarian reply new --apply
-librarian list
-librarian search "query"
-librarian mark-read "Title or filename" --apply
-librarian skip "Title or filename" --apply
-```
-
-Commands that modify files or Markdown are dry-run by default. Use `--apply` to write changes.
-
-`mount` is the onboarding workflow for a new user or fork. It checks the local environment, detects available model CLIs, recommends a provider-neutral `model_command`, and previews `_state/config.toml` changes. `mount --check` is read-only. `mount --apply` writes local ignored config only.
-
-See `docs/mount.md` for the human and agent setup runbook.
-See `docs/automation.md` for daily and weekly scheduler setup.
-
-`daily` is the automation-friendly daily workflow. It prepares scanned inbox PDFs with OCR when needed, ingests supported inbox files with optional catalog lookup and model enrichment, and then runs lint. Use `daily --apply --lookup --enrich` for the unattended new-file pipeline when catalog lookup and model enrichment are configured. Full-library maintenance remains explicit with `--maintain`. Dry-run remains non-mutating.
-
-`status` prints a compact snapshot of library size, read/unread counts, inbox pressure, review blockers, and the next weekly pick.
-
-`weekly` is the automation-friendly digest workflow. It previews a notification by default. Use `weekly --apply` to write the draft and sent state, or `weekly --email --apply` to send email when configured.
-
-`lint --apply` only repairs missing index entries for files that are already in `library/`; it does not rename files, delete files, or resolve every lint issue automatically.
-
-`ingest --lookup`, `reindex --lookup`, and `maintain --lookup` use Open Library as an optional catalog fallback for weak metadata. Local filename/PDF/text extraction is tried first, and lookup is off by default.
-
-`ingest --enrich`, `reindex --enrich`, `maintain --enrich`, and `enrich` use a configured `model_command` to turn extracted text into a real summary, work-specific primer prompts, tags, and related-reading notes. Model enrichment is off by default.
-
-`ocr` is the local scanned-PDF repair bridge. It previews entries marked `needs_ocr` by default. With `--apply`, it runs the configured `ocr_command` and writes a no-overwrite OCR copy to `_output/ocr/` for review; it does not replace or delete library files.
-
-`repair` is the targeted blocker workflow. It previews existing non-digest-ready entries and can apply OCR promotion, catalog lookup, and model enrichment with `--ocr`, `--lookup`, and `--enrich`. `maintain` remains the broader full-library repair workflow.
-
-`digest` is the weekly read workflow. It renders a draft by default, writes the draft and sent state with `--apply`, prints an automation-friendly notification with `--notify`, and sends email only with `--email --apply` after email environment variables are configured. `weekly-pick` remains as a compatibility alias.
-
-Digest drafts include the work summary, a compact reading-history line, primer questions, and the local file path. `--notify` prints a shorter preview with the title, author, summary, history, one primer prompt, and draft path. Entries marked `needs_model` are not digest-ready.
-
-`reply` is the command-line target for automation or email-reply handlers. It acts on the latest sent digest from `_state/sent-log.md`: `reply skip --apply` marks it skipped, `reply read --apply` marks it read, and `reply new --apply` marks it skipped and writes the next digest-ready draft. Like the rest of the tool, it previews by default.
-
-## Metadata Pipeline
-
-The librarian uses the cheapest reliable step first:
-
-1. Parse filenames.
-2. Read embedded file metadata.
-3. Extract local text with command-line libraries such as `pypdf`.
-4. Use catalog lookup for weak title, author, or year metadata.
-5. Use OCR only when a file has no extractable text and content-level work is needed.
-6. Use model help only for semantic improvements such as summaries, tags, related works, and reading prompts.
-
-Each index entry includes `Next action` so humans and agents know what to do next:
-
-- `clean`: no immediate automated repair is needed.
-- `needs_catalog`: run lookup before OCR or model work.
-- `needs_ocr`: metadata is usable, but content extraction needs OCR.
-- `needs_manual`: automated repair was not confident enough.
-- `needs_model`: text and metadata are available; a model could improve summaries, tags, or prompts.
-
-## Model Enrichment Contract
-
-Configure a model command in `_state/config.toml` or with `LIBRARIAN_MODEL_COMMAND`.
-
-```toml
-[behavior]
-use_model_assistance = false
-model_command = ["path/to/enrich-command"]
-model_max_input_chars = 12000
-require_external_model_approval = true
-```
-
-The command receives JSON on stdin with the work metadata, instructions, and a text excerpt. It must print JSON on stdout:
-
-```json
-{
-  "summary": "One to three specific sentences about the work.",
-  "primer_prompts": [
-    "A work-specific question for entering the text.",
-    "A second work-specific question.",
-    "A third work-specific question."
-  ],
-  "tags": ["philosophy", "media"],
-  "related": "Optional concise related-reading note."
-}
-```
-
-The CLI rejects incomplete enrichment output. A usable enrichment needs a specific summary and at least two primer prompts.
-
-### Provider Hooks
-
-The public project does not ship provider-specific model adapters. Keep model use behind the `model_command` contract so a Codex, Claude, OpenAI, Ollama, or local-model user can provide the command that fits their environment.
-
-The command may be a shell script, Python script, local binary, or model CLI wrapper. It must read the librarian JSON payload from stdin and print the enrichment JSON schema above to stdout.
-
-For public forks, provider-specific hooks should be created in ignored local state such as `_state/model-enrich-local`, then configured through `_state/config.toml` or `LIBRARIAN_MODEL_COMMAND`. See `docs/mount.md` for the agent setup protocol and synthetic hook test.
-
-`require_external_model_approval` is the project-level consent toggle for agents. The public default is `true`; a local user can set it to `false` in ignored `_state/config.toml` after deciding that the configured provider may receive enrichment excerpts.
-
-## Filename Convention
-
-```text
-LastFirst_Title_Subtitle_Year_WorkType.ext
-```
-
-Examples:
-
-```text
-DebordGuy_SocietyOfTheSpectacle_1967_book.pdf
-Unknown_NotesOnCybernetics_nd_article.pdf
-```
-
-Collisions never overwrite existing files. A short stable hash suffix is appended when needed.
-
-Ingest also reserves planned filenames before applying a batch, so two inbox files that resolve to the same target name are both kept.
-
-## Safety
-
-- New library files and weekly drafts are created with no-overwrite file operations.
-- Supported files in `inbox/` are moved only by `ingest --apply`.
-- After `librarian init`, `index.md`, ingest logs, sent/status logs, and weekly draft state are edited only by commands run with `--apply`.
-- Configured paths are kept inside the project root.
-- Symlinked inbox files are ignored.
-- No SQL, database, or wiki is used.
-- Model calls happen only when `--enrich`, `librarian enrich`, or `use_model_assistance = true` is configured.
-- Email is sent only when explicitly requested with `digest --email --apply` and configured through environment variables.
-- Optional catalog lookup uses Open Library only when explicitly requested with `--lookup` or enabled in `_state/config.toml`.
-
-Email delivery uses Resend's HTTPS API without a required package dependency. Configure it with:
-
-```bash
-export RESEND_API_KEY="..."
-export LIBRARIAN_EMAIL_FROM="Reading Librarian <reads@example.com>"
-export LIBRARIAN_EMAIL_TO="you@example.com"
-```
-
-## Scheduling Examples
-
-The CLI does not install scheduled jobs automatically.
-
-The recommended automation commands are documented in `docs/automation.md`.
-
-### cron
-
-```cron
-0 8 * * * cd /path/to/reading-librarian && librarian daily --apply --lookup --enrich
-0 9 * * 1 cd /path/to/reading-librarian && librarian lint
-0 10 * * 1 cd /path/to/reading-librarian && librarian weekly --apply
-```
-
-### macOS launchd
-
-Create `~/Library/LaunchAgents/local.reading-librarian.daily.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>local.reading-librarian.daily</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/path/to/venv/bin/librarian</string>
-    <string>daily</string>
-    <string>--apply</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>/path/to/reading-librarian</string>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>8</integer>
-    <key>Minute</key>
-    <integer>0</integer>
-  </dict>
-</dict>
-</plist>
-```
-
-Load it manually when ready:
-
-```bash
-launchctl load ~/Library/LaunchAgents/local.reading-librarian.daily.plist
-```
-
-## Notes
-
-- No SQL or database is used.
-- No wiki or author-folder structure is created.
-- Real email is sent only by `digest --email --apply` with email environment variables configured.
-- Scanned or unreadable PDFs are marked for review instead of silently passing.
-"""
-
-
-def supported_files(config: Config, folder: Path) -> list[Path]:
-    if not folder.exists():
-        return []
-    return sorted(
-        path
-        for path in folder.iterdir()
-        if path.is_file() and not path.is_symlink() and path.suffix.lower() in config.supported_extensions
-    )
+    return Path(__file__).resolve().parents[2].joinpath("README.md").read_text(encoding="utf-8")
 
 
 def command_ingest(args: argparse.Namespace, root: Path) -> int:
@@ -678,6 +152,12 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             review.append(f"Could not read text: {exc}")
+    elif path.suffix.lower() == ".epub":
+        text, extraction_review = extract_epub(path)
+        review.extend(extraction_review)
+    elif path.suffix.lower() == ".docx":
+        text, extraction_review = extract_docx(path)
+        review.extend(extraction_review)
     else:
         review.append(f"Text extraction not implemented for {path.suffix.lower()}.")
 
@@ -808,6 +288,81 @@ def extract_pdf(path: Path) -> tuple[dict[str, str], str, list[str]]:
     except Exception as exc:
         review.append(f"PDF extraction failed: {exc}")
     return metadata, "\n".join(text_parts), review
+
+
+def extract_epub(path: Path) -> tuple[str, list[str]]:
+    review: list[str] = []
+    text_parts: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = sorted(
+                name
+                for name in archive.namelist()
+                if name.lower().endswith((".xhtml", ".html", ".htm"))
+                and not name.endswith("/")
+            )
+            if not names:
+                return "", ["EPUB contains no XHTML/HTML text files."]
+            for name in names:
+                try:
+                    raw = archive.read(name)
+                except KeyError:
+                    continue
+                text = html_document_text(raw)
+                if text:
+                    text_parts.append(text)
+    except (OSError, zipfile.BadZipFile) as exc:
+        review.append(f"EPUB extraction failed: {exc}")
+    text = "\n\n".join(text_parts)
+    if not text.strip() and not review:
+        review.append("No extractable EPUB text found.")
+    return text, review
+
+
+def extract_docx(path: Path) -> tuple[str, list[str]]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            try:
+                xml = archive.read("word/document.xml")
+            except KeyError:
+                return "", ["DOCX is missing word/document.xml."]
+    except (OSError, zipfile.BadZipFile) as exc:
+        return "", [f"DOCX extraction failed: {exc}"]
+
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as exc:
+        return "", [f"DOCX XML extraction failed: {exc}"]
+
+    paragraphs: list[str] = []
+    for paragraph in root.iter():
+        if not paragraph.tag.endswith("}p") and paragraph.tag != "p":
+            continue
+        runs: list[str] = []
+        for node in paragraph.iter():
+            if node.tag.endswith("}t") or node.tag == "t":
+                runs.append(node.text or "")
+            elif node.tag.endswith("}tab") or node.tag == "tab":
+                runs.append("\t")
+        text = "".join(runs).strip()
+        if text:
+            paragraphs.append(text)
+
+    text = "\n\n".join(paragraphs)
+    if not text.strip():
+        return "", ["No extractable DOCX text found."]
+    return text, []
+
+
+def html_document_text(raw: bytes) -> str:
+    text = raw.decode("utf-8", errors="replace")
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+    text = re.sub(r"(?is)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)</p\s*>", "\n\n", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
 
 
 def pdf_needs_visual_title_fallback(path: Path, metadata: dict[str, str], text: str) -> bool:
@@ -1385,13 +940,6 @@ def first_known_year(*values: str) -> str:
     return ""
 
 
-def clean_work_type(value: str) -> str:
-    value = value.lower().strip()
-    aliases = {"ebook": "book", "essays": "essay", "stories": "story"}
-    value = aliases.get(value, value)
-    return value if value in WORK_TYPES else "unknown"
-
-
 def summarize_text(title: str, text: str, review: list[str]) -> str:
     if review and not text.strip():
         if any("No extractable" in item for item in review):
@@ -1535,271 +1083,6 @@ def normalize_tag(value: str) -> str:
     value = re.sub(r"[^a-z0-9 -]+", "", value.lower())
     value = re.sub(r"\s+", "-", value).strip("-")
     return value[:32]
-
-
-def make_filename(entry: WorkEntry, config: Config, suffix: str | None = None) -> str:
-    author = author_filename_key(entry.author)
-    title = compact_pascal(entry.title) or "Untitled"
-    year = entry.year or "nd"
-    work_type = entry.work_type or "unknown"
-    ext = suffix or Path(entry.original_filename).suffix.lower()
-    stem = f"{author}_{title}_{year}_{work_type}"
-    if len(stem) > config.max_filename_stem_chars:
-        overflow = len(stem) - config.max_filename_stem_chars
-        keep_title = max(18, len(title) - overflow)
-        title = title[:keep_title].rstrip("_")
-        stem = f"{author}_{title}_{year}_{work_type}"
-    return normalize_filename(f"{stem}{ext}")
-
-
-def author_filename_key(author: str) -> str:
-    if author == "Unknown":
-        return "Unknown"
-    et_al = author.endswith(" et al.")
-    author = author.removesuffix(" et al.")
-    if "," in author:
-        last, first = [part.strip() for part in author.split(",", 1)]
-        key = compact_pascal(f"{last} {first}")
-    else:
-        key = compact_pascal(author)
-    return f"{key}EtAl" if et_al else key
-
-
-def compact_pascal(value: str) -> str:
-    words = re.findall(r"[A-Za-z0-9]+", value)
-    return "".join(word[:1].upper() + word[1:] for word in words)
-
-
-def normalize_filename(value: str) -> str:
-    value = re.sub(r"[^A-Za-z0-9._-]", "", value)
-    value = re.sub(r"_+", "_", value)
-    return value.strip("._") or "Unknown_Untitled_nd_unknown"
-
-
-def unique_filename(library: Path, filename: str, source: Path, reserved: set[str] | None = None) -> str:
-    reserved = reserved or set()
-    target = library / filename
-    if not target.exists() and filename not in reserved:
-        return filename
-    suffix = stable_hash(source)
-    path = Path(filename)
-    candidate = f"{path.stem}_{suffix}{path.suffix}"
-    counter = 2
-    while (library / candidate).exists() or candidate in reserved:
-        candidate = f"{path.stem}_{suffix}{counter}{path.suffix}"
-        counter += 1
-    return candidate
-
-
-def unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    counter = 2
-    while True:
-        candidate = path.with_name(f"{path.stem}_{counter}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-        counter += 1
-
-
-def move_without_overwrite(source: Path, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    created_target = False
-    try:
-        with source.open("rb") as src:
-            dst = target.open("xb")
-            created_target = True
-            with dst:
-                shutil.copyfileobj(src, dst)
-        shutil.copystat(source, target)
-    except Exception:
-        if created_target and target.exists():
-            target.unlink()
-        raise
-    source.unlink()
-
-
-def write_text_without_overwrite(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as handle:
-        handle.write(text)
-
-
-def write_index(path: Path, entries: list[WorkEntry]) -> None:
-    write_text_atomic(path, render_index(entries))
-
-
-def write_text_atomic(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        temp.write_text(text, encoding="utf-8")
-        temp.replace(path)
-    finally:
-        if temp.exists():
-            temp.unlink()
-
-
-def stable_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        digest.update(path.name.encode("utf-8"))
-    return digest.hexdigest()[:8]
-
-
-def read_index(path: Path) -> list[WorkEntry]:
-    if not path.exists():
-        return []
-    text = path.read_text(encoding="utf-8")
-    entries: list[WorkEntry] = []
-    current_author = "Unknown"
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if line.startswith("### "):
-            current_author = line[4:].strip()
-            index += 1
-            continue
-        if line.startswith("- **"):
-            block = [line]
-            index += 1
-            while index < len(lines) and (lines[index].startswith("  ") or not lines[index].strip()):
-                if lines[index].strip():
-                    block.append(lines[index])
-                index += 1
-            entries.append(parse_entry_block(current_author, block))
-            continue
-        index += 1
-    return entries
-
-
-def parse_entry_block(author: str, block: list[str]) -> WorkEntry:
-    first = block[0]
-    match = re.match(r"- \*\*(.*?)\*\* \((.*?)\) — ([A-Za-z]+)", first)
-    entry = WorkEntry(author=author)
-    if match:
-        entry.title = match.group(1)
-        entry.year = match.group(2)
-        entry.work_type = clean_work_type(match.group(3))
-    for raw in block[1:]:
-        line = raw.strip()
-        if line.startswith("File:"):
-            entry.filename = strip_code(line.removeprefix("File:").strip())
-        elif line.startswith("Original filename:"):
-            entry.original_filename = strip_code(line.removeprefix("Original filename:").strip())
-        elif line.startswith("Status:"):
-            entry.status = line.removeprefix("Status:").strip()
-        elif line.startswith("Sent:"):
-            entry.sent = line.removeprefix("Sent:").strip()
-        elif line.startswith("Reading time:"):
-            entry.reading_time = line.removeprefix("Reading time:").strip()
-        elif line.startswith("Summary:"):
-            entry.summary = line.removeprefix("Summary:").strip()
-        elif line.startswith("Primer prompts:"):
-            entry.primer_prompts = parse_inline_list(line.removeprefix("Primer prompts:").strip(), separator=" | ")
-        elif line.startswith("Tags:"):
-            tags = line.removeprefix("Tags:").strip()
-            entry.tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
-        elif line.startswith("Related:"):
-            entry.related = line.removeprefix("Related:").strip()
-        elif line.startswith("Next action:"):
-            entry.next_action = line.removeprefix("Next action:").strip()
-    return entry
-
-
-def strip_code(value: str) -> str:
-    return value.strip().strip("`")
-
-
-def one_line(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def parse_inline_list(value: str, separator: str = " | ") -> list[str]:
-    if not value or value == "None.":
-        return []
-    return [item.strip() for item in value.split(separator) if item.strip()]
-
-
-def inline_code(value: str) -> str:
-    value = one_line(value)
-    fence = "``" if "`" in value else "`"
-    return f"{fence}{value}{fence}"
-
-
-def render_index(entries: list[WorkEntry]) -> str:
-    entries = sorted(entries, key=lambda item: (item.author_key, item.display_title.lower(), item.year))
-    recent = sorted(entries, key=lambda item: item.added or "", reverse=True)[:5]
-    lines = ["# Reading Library Index", "", "## Recently Added", ""]
-    if recent:
-        for entry in recent:
-            lines.append(f"- {one_line(entry.display_title)} — {one_line(entry.author)} ({inline_code(entry.filename)})")
-    lines.extend(["", "## Authors", ""])
-
-    by_author: dict[str, list[WorkEntry]] = {}
-    for entry in entries:
-        by_author.setdefault(entry.author, []).append(entry)
-
-    for author in sorted(by_author, key=author_sort_key):
-        lines.extend([f"### {author}", ""])
-        for entry in sorted(by_author[author], key=lambda item: (item.display_title.lower(), item.year)):
-            lines.extend(render_entry(entry))
-            lines.append("")
-
-    lines.extend(["## Tags", ""])
-    tag_map: dict[str, list[str]] = {}
-    for entry in entries:
-        for tag in entry.tags:
-            tag_map.setdefault(tag, []).append(f"{entry.display_title} ({entry.author})")
-    if tag_map:
-        for tag in sorted(tag_map):
-            works = "; ".join(sorted(tag_map[tag])[:8])
-            lines.append(f"- {tag}: {works}")
-    lines.extend(["", "## Needs Review", ""])
-    needs_review = [entry for entry in entries if entry_needs_review(entry)]
-    if needs_review:
-        for entry in sorted(needs_review, key=lambda item: (item.author_key, item.display_title.lower())):
-            reasons = "; ".join(review_reasons(entry))
-            lines.append(f"- {inline_code(entry.filename)} — {one_line(entry.display_title)} by {one_line(entry.author)}: {one_line(reasons)}")
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_entry(entry: WorkEntry) -> list[str]:
-    return [
-        f"- **{one_line(entry.display_title)}** ({one_line(entry.year)}) — {one_line(entry.work_type)}  ",
-        f"  File: {inline_code(entry.filename)}  ",
-        f"  Original filename: {inline_code(entry.original_filename)}  ",
-        f"  Status: {one_line(entry.status)}  ",
-        f"  Sent: {one_line(entry.sent)}  ",
-        f"  Reading time: {one_line(entry.reading_time)}  ",
-        f"  Summary: {one_line(entry.summary)}  ",
-        f"  Primer prompts: {render_inline_list(entry.primer_prompts)}  ",
-        f"  Tags: {one_line(', '.join(entry.tags))}  ",
-        f"  Related: {one_line(entry.related)}  ",
-        f"  Next action: {one_line(entry.next_action)}",
-    ]
-
-
-def render_inline_list(values: list[str]) -> str:
-    cleaned = [one_line(value) for value in values if one_line(value)]
-    return " | ".join(cleaned) if cleaned else "None."
-
-
-def author_sort_key(author: str) -> str:
-    if author == "Unknown":
-        return "zzzzzz unknown"
-    return author.lower()
-
-
-def upsert_entry(entries: list[WorkEntry], entry: WorkEntry) -> list[WorkEntry]:
-    kept = [existing for existing in entries if existing.filename != entry.filename]
-    kept.append(entry)
-    return kept
 
 
 def append_ingest_log(path: Path, original: str, entry: WorkEntry, target: Path) -> None:
@@ -2832,6 +2115,10 @@ def extract_text_for_enrichment(path: Path) -> tuple[str, list[str]]:
             return path.read_text(encoding="utf-8", errors="replace"), []
         except OSError as exc:
             return "", [f"Could not read text: {exc}"]
+    if path.suffix.lower() == ".epub":
+        return extract_epub(path)
+    if path.suffix.lower() == ".docx":
+        return extract_docx(path)
     return "", [f"Text extraction not implemented for {path.suffix.lower()}."]
 
 
@@ -3252,32 +2539,6 @@ def match_entries(entries: list[WorkEntry], query: str) -> list[WorkEntry]:
         for entry in entries
         if needle in entry.title.lower() or needle in entry.filename.lower() or needle in entry.author.lower()
     ]
-
-
-def entry_needs_review(entry: WorkEntry) -> bool:
-    return bool(review_reasons(entry))
-
-
-def review_reasons(entry: WorkEntry) -> list[str]:
-    reasons = list(entry.needs_review)
-    summary = entry.summary.lower()
-    if entry.next_action == "needs_catalog":
-        reasons.append("Metadata is weak; catalog lookup is the next cheap repair step.")
-    if entry.next_action == "needs_ocr":
-        reasons.append("OCR is needed before content-level summary or reading-time work.")
-    if entry.next_action == "needs_manual":
-        reasons.append("Automated metadata repair was not confident enough.")
-    if entry.next_action == "needs_model":
-        reasons.append("Model enrichment is needed for a reliable summary and work-specific primer prompts.")
-    if "needs review" in summary:
-        reasons.append("Summary or metadata needs review.")
-    if "no extractable text" in summary or "ocr is needed" in summary:
-        reasons.append("No extractable text found; may need OCR.")
-    if entry.author == "Unknown" or "," not in entry.author:
-        reasons.append("Author could not be fully inferred.")
-    if entry.title == "Untitled":
-        reasons.append("Title could not be inferred.")
-    return dedupe(reasons)
 
 
 def build_parser() -> argparse.ArgumentParser:
