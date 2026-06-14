@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-ROOT="/Users/spencer/librarian"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 INBOX="$ROOT/inbox"
 
 notify() {

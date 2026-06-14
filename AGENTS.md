@@ -30,7 +30,7 @@ Mount protocol for new users or forks:
 - Write local config only with `librarian mount --apply`.
 - Ask the user before choosing automatic model enrichment, email delivery, or write-state digest automation.
 - Prefer `privacy=assisted` and `digest=notify`.
-- Prefer local weekly delivery for this user when requested: `librarian weekly --apply --notify-mac --open --message-self`. Configure `message_to` in ignored `_state/config.toml` or `LIBRARIAN_MESSAGE_TO`; do not require email for the default low-friction flow.
+- Prefer local weekly delivery when requested: `librarian weekly --apply --notify-mac --open --message-self`. Configure `message_to` in ignored `_state/config.toml` or `LIBRARIAN_MESSAGE_TO`; do not require email for the default low-friction flow.
 - Before sending text excerpts to an external model, check `_state/config.toml` for `require_external_model_approval`; if it is missing or true, ask for explicit user approval.
 - If `require_external_model_approval = false`, the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
 - If model enrichment is desired, create the provider-specific hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.

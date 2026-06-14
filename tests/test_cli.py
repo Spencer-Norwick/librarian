@@ -292,6 +292,41 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertNotEqual(entries[0].next_action, "needs_ocr")
             self.assertIn("carrier bag theory reframes technology", entries[0].summary)
 
+    def test_clean_workspace_smoke_workflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            text_source = root / "inbox" / "Ong_Walter_OralityAndLiteracy_1982_book.txt"
+            text_source.write_text("Writing restructures consciousness.", encoding="utf-8")
+            epub_source = root / "inbox" / "LeGuin_Ursula_CarrierBagTheory_1986_essay.epub"
+            self.write_epub(epub_source, "The carrier bag theory reframes technology around gathering and holding.")
+
+            code, output = self.run_cli(root, "ingest")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Dry run only", output)
+            self.assertTrue(text_source.exists())
+            self.assertTrue(epub_source.exists())
+            self.assertEqual(read_index(root / "library" / "index.md"), [])
+
+            code, output = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied ingest for 2 file", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(len(entries), 2)
+
+            code, output = self.run_cli(root, "status")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Total works: 2", output)
+
+            code, output = self.run_cli(root, "weekly")
+
+            self.assertEqual(code, 1)
+            self.assertIn("No digest-ready unread works found", output)
+            self.assertIn("needs model enrichment", output)
+
     def test_daily_dry_run_does_not_move_inbox_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -8,8 +8,22 @@ version = "0.1.0"
 description = "A local flat-file reading librarian CLI."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Local User" }]
+license = "MIT"
+authors = [{ name = "Spencer Norwick" }]
 dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/Spencer-Norwick/librarian"
+Repository = "https://github.com/Spencer-Norwick/librarian"
+Issues = "https://github.com/Spencer-Norwick/librarian/issues"
 
 [project.optional-dependencies]
 pdf = ["pypdf>=4"]
