@@ -114,6 +114,7 @@ Each index entry includes `Next action` so humans and agents know the next repai
 
 - `docs/mount.md`: setup protocol for humans and agents
 - `docs/automation.md`: daily/weekly scheduler and local delivery setup
+- `docs/examples.md`: tiny synthetic examples
 - `AGENTS.md`: project rules for Codex-style agents
 
 ## Development
