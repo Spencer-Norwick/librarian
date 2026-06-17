@@ -123,6 +123,7 @@ class LibraryStatus:
     unread: int
     read: int
     skipped: int
+    sent_total: int
     digest_ready: int
     unsent_ready: int
     inbox_count: int

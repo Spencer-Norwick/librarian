@@ -42,7 +42,7 @@ cd /path/to/reading-librarian
 .venv/bin/librarian weekly --apply --notify-mac --open --message-self
 ```
 
-For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then writes the weekly draft, posts a macOS notification, opens the local reading file, and sends the title, summary, first prompt, and draft path through Messages. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
+For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then writes the weekly draft, posts a macOS notification, opens the local reading file, and sends the title, summary, first prompt, and compact library status through Messages. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
 
 ## Preview Before Enabling
 

@@ -625,7 +625,7 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Subject: Read of the Week", output)
             self.assertIn("Summary:\nA specific summary that is ready for a weekly digest.", output)
-            self.assertIn("Reading history:\nFirst time in the digest; never skipped.", output)
+            self.assertIn("This work: First time in the digest; never skipped.", output)
             self.assertIn("Primer prompts:", output)
             self.assertEqual(list((root / "_output" / "weekly-read-drafts").glob("*.md")), [])
 
@@ -659,9 +659,11 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("-----\nLibrary status", output)
-            self.assertIn("Library: 3 works; 1 read; 2 unread; 0 skipped.", output)
-            self.assertIn("Ready queue: 2 unsent digest-ready works", output)
-            self.assertIn("Next after this: Second.", output)
+            self.assertIn("This work: First time in the digest; never skipped.", output)
+            self.assertIn("Library: 3 total works; 1 sent; 1 read; 2 unread; 0 skipped.", output)
+            self.assertIn("Queue: 1 unsent digest-ready works; 2 digest-ready total.", output)
+            self.assertIn("Needs attention: 0; inbox: 0 pending files.", output)
+            self.assertNotIn("Next after this", output)
 
     def test_status_command_prints_library_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -680,6 +682,7 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Library status", output)
             self.assertIn("Total works: 3", output)
+            self.assertIn("Total sent: 0", output)
             self.assertIn("Digest-ready: 1; unsent ready: 1", output)
             self.assertIn("Inbox pending: 1", output)
             self.assertIn("Review blockers: 1", output)
@@ -774,6 +777,10 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(commands[1][0], "open")
             self.assertEqual(commands[2][:2], ["osascript", "-e"])
             self.assertIn("Read of the Week: Never Sent", commands[2][2])
+            self.assertIn("-----\\nLibrary status", commands[2][2])
+            self.assertIn("This work: First time in the digest; never skipped.", commands[2][2])
+            self.assertIn("Library: 1 total works; 1 sent; 0 read; 1 unread; 0 skipped.", commands[2][2])
+            self.assertNotIn("Draft:", commands[2][2])
 
     def test_digest_history_counts_prior_sends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,7 +803,7 @@ class LibrarianCliTests(unittest.TestCase):
             code, output = self.run_cli(root, "digest", "--allow-repeats")
 
             self.assertEqual(code, 0)
-            self.assertIn("Reading history:\nSent 2 times; last sent 2026-01-01; never skipped.", output)
+            self.assertIn("This work: Sent 2 times; last sent 2026-01-01; never skipped.", output)
             self.assertIn("is being repeated intentionally", output)
 
     def test_digest_history_counts_skips(self) -> None:
@@ -814,7 +821,55 @@ class LibrarianCliTests(unittest.TestCase):
             code, output = self.run_cli(root, "digest")
 
             self.assertEqual(code, 0)
-            self.assertIn("Reading history:\nFirst time in the digest; skipped once.", output)
+            self.assertIn("This work: First time in the digest; never skipped.", output)
+
+    def test_digest_history_ignores_skip_logs_before_first_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "status-log.md").write_text(
+                "# Status Log\n\n"
+                "- 2026-01-01T09:00:00 — `BAuthor_NeverSent_2001_book.txt` unread -> skipped\n"
+                "- 2026-01-08T09:00:00 — `BAuthor_NeverSent_2001_book.txt` unread -> skipped\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(root, "digest")
+
+            self.assertEqual(code, 0)
+            self.assertIn("This work: First time in the digest; never skipped.", output)
+            self.assertNotIn("skipped 2 times", output)
+
+    def test_digest_history_counts_skips_after_digest_sends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(
+                author="B, Author",
+                title="Already Sent",
+                filename="BAuthor_AlreadySent_2001_book.txt",
+                sent="2026-01-08",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                "# Sent Log\n\n"
+                "- 2026-01-01T09:00:00 — `BAuthor_AlreadySent_2001_book.txt` drafted as `draft-1.md`\n"
+                "- 2026-01-08T09:00:00 — `BAuthor_AlreadySent_2001_book.txt` drafted as `draft-2.md`\n",
+                encoding="utf-8",
+            )
+            (root / "_state" / "status-log.md").write_text(
+                "# Status Log\n\n"
+                "- 2026-01-02T09:00:00 — `BAuthor_AlreadySent_2001_book.txt` unread -> skipped\n"
+                "- 2026-01-09T09:00:00 — `BAuthor_AlreadySent_2001_book.txt` unread -> skipped\n",
+                encoding="utf-8",
+            )
+
+            code, output = self.run_cli(root, "digest", "--allow-repeats")
+
+            self.assertEqual(code, 0)
+            self.assertIn("This work: Sent 2 times; last sent 2026-01-08; skipped 2 times.", output)
 
     def test_digest_email_requires_config_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

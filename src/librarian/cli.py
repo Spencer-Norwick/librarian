@@ -1628,7 +1628,8 @@ def digest_blocker_line(entry: WorkEntry) -> str:
 
 
 def digest_draft(entry: WorkEntry, local_path: Path, history: DigestHistory, status: LibraryStatus | None = None) -> str:
-    footer = f"\n{render_status_footer(status)}" if status else ""
+    del local_path
+    footer = f"\n{render_status_footer(status, history)}" if status else ""
     return f"""Subject: Read of the Week: {entry.display_title} by {entry.author}
 
 Title: {entry.display_title}
@@ -1637,17 +1638,11 @@ Author: {entry.author}
 Summary:
 {entry.summary}
 
-Reading history:
-{human_digest_history(history)}
-
 Why this is worth reading now:
 {digest_rationale(history)}
 
 Primer prompts:
 {render_prompt_bullets(entry.primer_prompts)}
-
-Local file path:
-{local_path}
 {footer}
 """
 
@@ -1655,6 +1650,12 @@ Local file path:
 def build_library_status(config: Config, entries: list[WorkEntry], current_pick: WorkEntry | None = None) -> LibraryStatus:
     ready = [entry for entry in entries if entry_digest_ready(entry)]
     unsent_ready = [entry for entry in ready if entry.sent == "never"]
+    current_pick_pending = current_pick is not None and current_pick.sent == "never"
+    remaining_unsent_ready = [
+        entry
+        for entry in unsent_ready
+        if current_pick is None or entry.filename != current_pick.filename
+    ]
     next_entry = sorted(unsent_ready, key=lambda item: (item.author_key, item.display_title.lower()))
     display_next = current_pick or (next_entry[0] if next_entry else None)
     future = [entry for entry in unsent_ready if display_next is None or entry.filename != display_next.filename]
@@ -1664,8 +1665,9 @@ def build_library_status(config: Config, entries: list[WorkEntry], current_pick:
         unread=sum(entry.status == "unread" for entry in entries),
         read=sum(entry.status == "read" for entry in entries),
         skipped=sum(entry.status == "skipped" for entry in entries),
+        sent_total=sum(entry.sent != "never" for entry in entries) + (1 if current_pick_pending else 0),
         digest_ready=len(ready),
-        unsent_ready=len(unsent_ready),
+        unsent_ready=len(remaining_unsent_ready),
         inbox_count=len(supported_files(config, config.inbox)),
         review_count=sum(entry.status not in {"read", "skipped"} and not entry_digest_ready(entry) for entry in entries),
         next_title=display_next.display_title if display_next else "None",
@@ -1674,17 +1676,21 @@ def build_library_status(config: Config, entries: list[WorkEntry], current_pick:
     )
 
 
-def render_status_footer(status: LibraryStatus) -> str:
-    return "\n".join(
+def render_status_footer(status: LibraryStatus, history: DigestHistory | None = None) -> str:
+    lines = [
+        "-----",
+        "Library status",
+    ]
+    if history:
+        lines.append(f"This work: {human_digest_history(history)}")
+    lines.extend(
         [
-            "-----",
-            "Library status",
-            f"Library: {status.total} works; {status.read} read; {status.unread} unread; {status.skipped} skipped.",
-            f"Ready queue: {status.unsent_ready} unsent digest-ready works ({status.digest_ready} ready total).",
-            f"Inbox: {status.inbox_count} pending file{'s' if status.inbox_count != 1 else ''}; review blockers: {status.review_count}.",
-            f"Next after this: {status.next_after_title}.",
+            f"Library: {status.total} total works; {status.sent_total} sent; {status.read} read; {status.unread} unread; {status.skipped} skipped.",
+            f"Queue: {status.unsent_ready} unsent digest-ready works; {status.digest_ready} digest-ready total.",
+            f"Needs attention: {status.review_count}; inbox: {status.inbox_count} pending file{'s' if status.inbox_count != 1 else ''}.",
         ]
     )
+    return "\n".join(lines)
 
 
 def render_status_summary(status: LibraryStatus) -> str:
@@ -1693,6 +1699,7 @@ def render_status_summary(status: LibraryStatus) -> str:
         [
             "Library status",
             f"Total works: {status.total}",
+            f"Total sent: {status.sent_total}",
             f"Read: {status.read}; unread: {status.unread}; skipped: {status.skipped}",
             f"Digest-ready: {status.digest_ready}; unsent ready: {status.unsent_ready}",
             f"Inbox pending: {status.inbox_count}",
@@ -1713,10 +1720,10 @@ def command_status(args: argparse.Namespace, root: Path) -> int:
 
 def digest_history(config: Config, entry: WorkEntry) -> DigestHistory:
     sent_count = count_log_entries(config.sent_log, entry.filename)
-    skip_count = count_status_transitions(config.status_log, entry.filename, "skipped")
     if entry.sent != "never" and sent_count == 0:
         sent_count = 1
-    if entry.status == "skipped" and skip_count == 0:
+    skip_count = count_status_transitions(config.status_log, entry.filename, "skipped") if sent_count else 0
+    if sent_count and entry.status == "skipped" and skip_count == 0:
         skip_count = 1
     return DigestHistory(sent_count=sent_count, last_sent="" if entry.sent == "never" else entry.sent, skip_count=skip_count)
 
@@ -1791,6 +1798,7 @@ def usable_digest_summary(entry: WorkEntry) -> bool:
 
 
 def render_digest_notification(entry: WorkEntry, draft_path: Path, history: DigestHistory) -> str:
+    del draft_path
     return "\n".join(
         [
             f"NOTIFY: Read of the Week: {entry.display_title}",
@@ -1798,7 +1806,6 @@ def render_digest_notification(entry: WorkEntry, draft_path: Path, history: Dige
             f"Summary: {entry.summary}",
             f"History: {human_digest_history(history)}",
             f"Primer prompt: {first_primer_prompt(entry)}",
-            f"Draft: {draft_path}",
         ]
     )
 
@@ -1834,7 +1841,8 @@ def open_local_file(path: Path) -> None:
 
 def send_message_to_self(config: Config, entry: WorkEntry, draft_path: Path, history: DigestHistory) -> None:
     recipient = require_message_config(config)
-    message = render_self_message(entry, draft_path, history)
+    status = build_library_status(config, read_index(config.index), current_pick=entry)
+    message = render_self_message(entry, draft_path, history, status)
     script = (
         'tell application "Messages"\n'
         f"  set targetBuddy to {applescript_literal(recipient)}\n"
@@ -1845,14 +1853,15 @@ def send_message_to_self(config: Config, entry: WorkEntry, draft_path: Path, his
     run_osascript(script, "Messages send failed")
 
 
-def render_self_message(entry: WorkEntry, draft_path: Path, history: DigestHistory) -> str:
+def render_self_message(entry: WorkEntry, draft_path: Path, history: DigestHistory, status: LibraryStatus) -> str:
+    del draft_path
     return "\n".join(
         [
             f"Read of the Week: {entry.display_title}",
             f"Author: {entry.author}",
             f"Summary: {entry.summary}",
             f"Prompt: {first_primer_prompt(entry)}",
-            f"Draft: {draft_path}",
+            render_status_footer(status, history),
         ]
     )
 
