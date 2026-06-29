@@ -119,6 +119,7 @@ def humanize_title(value: str) -> str:
 
 
 def useful_pdf_title(value: str) -> bool:
+    raw = value.strip().lower()
     value = clean_title(value)
     lower = value.lower()
     if lower in {"title", "untitled"}:
@@ -127,7 +128,23 @@ def useful_pdf_title(value: str) -> bool:
         return False
     if re.fullmatch(r"document\d*", lower):
         return False
+    if re.fullmatch(r"[a-f0-9]{8,}(?:\.[a-z0-9]{1,5})?", raw):
+        return False
+    if Path(raw).suffix.lower() in {".pdf", ".epub", ".txt", ".md", ".doc", ".docx"}:
+        return False
     return bool(value)
+
+
+def weak_title(value: str) -> bool:
+    normalized = normalize_lookup_text(value)
+    compact = normalized.replace(" ", "")
+    if normalized in {"", "title", "untitled", "unknown"}:
+        return True
+    if re.fullmatch(r"\d+(?:pdf)?", compact):
+        return True
+    if re.fullmatch(r"[a-f0-9]{8,}(?:pdf)?", compact):
+        return True
+    return False
 
 
 def infer_author_from_text(text: str, surname_hint: str) -> str:

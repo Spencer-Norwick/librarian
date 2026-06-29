@@ -70,6 +70,7 @@ from .metadata import (
     should_lookup_catalog,
     should_use_text_title,
     useful_pdf_title,
+    weak_title,
 )
 
 
@@ -1036,6 +1037,7 @@ def build_targeted_metadata_repair_plan(config: Config, filenames: set[str], use
             continue
         entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=False)
         if old:
+            apply_original_filename_title_hint(entry, old)
             preserve_existing_state(entry, old)
             if old.next_action == "clean" and entry_needs_review(entry):
                 preserve_existing_semantics(entry, old)
@@ -1108,6 +1110,7 @@ def build_maintenance_plan(config: Config, use_catalog_lookup: bool = False, use
         entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=use_model_enrichment)
         old = existing_entries.get(path.name)
         if old:
+            apply_original_filename_title_hint(entry, old)
             preserve_existing_state(entry, old)
             if not use_model_enrichment:
                 preserve_existing_semantics(entry, old)
@@ -1134,7 +1137,29 @@ def should_repair_filename(current_name: str, entry: WorkEntry, desired_name: st
         return False
     if not filename_convention_ok(current_name):
         return True
+    current_title = infer_from_name(Path(current_name).stem).get("title", "")
+    if current_title and weak_title(current_title):
+        return True
     return "_nd_" in current_name and entry.year != "nd"
+
+
+def apply_original_filename_title_hint(entry: WorkEntry, old: WorkEntry) -> None:
+    if not old.original_filename or not weak_title(entry.title):
+        return
+    title = title_hint_from_original_filename(old.original_filename, entry.author)
+    if title and not weak_title(title):
+        entry.title = title
+
+
+def title_hint_from_original_filename(original_filename: str, author: str) -> str:
+    stem = Path(original_filename).stem
+    stem = re.sub(r"(?i)(?:[_\-\s]+ocr)$", "", stem)
+    title = clean_title(re.sub(r"[_\-]+", " ", stem))
+    author_parts = [part.strip() for part in re.split(r",|\s+", author) if part.strip()]
+    for author_part in sorted(author_parts, key=len, reverse=True):
+        pattern = rf"(?i)^{re.escape(author_part)}\s+"
+        title = re.sub(pattern, "", title).strip()
+    return clean_title(title)
 
 
 def preserve_existing_state(entry: WorkEntry, old: WorkEntry) -> None:

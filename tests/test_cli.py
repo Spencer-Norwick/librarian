@@ -23,6 +23,7 @@ from librarian.cli import (
     render_index,
     today,
 )
+from librarian.metadata import useful_pdf_title
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -545,6 +546,12 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].title, "Arranging Things A Rhetoric of Object Placement")
             self.assertEqual(entries[0].year, "2003")
             self.assertTrue((root / "library" / "KorenLeonard_ArrangingThingsARhetoricOfObjectPlacement_2003_unknown.pdf").exists())
+
+    def test_filename_like_pdf_metadata_titles_are_not_useful(self) -> None:
+        self.assertFalse(useful_pdf_title("1587859.pdf"))
+        self.assertFalse(useful_pdf_title("d915f1d3f5b3da7daf4305874403f888.pdf"))
+        self.assertFalse(useful_pdf_title("Self_Writing.pdf"))
+        self.assertTrue(useful_pdf_title("Ethics: Subjectivity and Truth"))
 
     def test_ingest_infers_title_page_identity_for_opaque_filename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1565,6 +1572,30 @@ class LibrarianCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertIn("BaudrillardJean_SimulacraAndSimulation_nd_book.txt -> BaudrillardJean_SimulacraAndSimulation_1994_book.txt", output)
+
+    def test_maintain_repairs_weak_title_from_original_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            weak = root / "library" / "FoucaultMichel_1587859Pdf_1994_book.txt"
+            weak.write_text("Michel Foucault Ethics Subjectivity and Truth Self Writing", encoding="utf-8")
+            old = WorkEntry(
+                author="Foucault, Michel",
+                title="1587859 pdf",
+                year="1994",
+                work_type="book",
+                filename=weak.name,
+                original_filename="Foucault_Self_Writing_ocr.pdf",
+                summary="Ready.",
+                next_action="clean",
+            )
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+
+            code, output = self.run_cli(root, "maintain")
+
+            self.assertEqual(code, 0)
+            self.assertIn("FoucaultMichel_1587859Pdf_1994_book.txt -> FoucaultMichel_SelfWriting_1994_book.txt", output)
+            self.assertTrue(weak.exists())
 
     def test_reindex_is_dry_run_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
