@@ -39,10 +39,10 @@ Low-friction local delivery:
 ```bash
 cd /path/to/reading-librarian
 .venv/bin/librarian daily --apply --lookup --enrich
-.venv/bin/librarian weekly --apply --notify-mac --open --message-self
+.venv/bin/librarian weekly-due --apply --notify-mac --open --message-self
 ```
 
-For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then writes the weekly draft, posts a macOS notification, opens the local reading file, and sends the title, summary, first prompt, and compact library status through Messages. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
+For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then calls the idempotent weekly delivery path. The weekly command writes a delivery journal at `_state/weekly-delivery.json`, posts a macOS notification, opens the local reading file, sends the title, summary, first prompt, and compact library status through Messages, then marks the pick sent only after requested delivery steps succeed. If a delivery step fails, a later launchd run retries the incomplete step without duplicating completed steps. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
 
 ## Preview Before Enabling
 
@@ -56,7 +56,8 @@ Expected safe output:
 
 - `daily` reports OCR preparation, pending inbox moves, and lint status, or says no supported files were found.
 - `weekly` prints a notification preview and draft body without writing a draft or sent state.
-- The launchd weekly script intentionally runs daily first; if daily fails, weekly stops instead of choosing from stale state.
+- `weekly-due` is for schedulers: it exits cleanly once the current week is complete and otherwise resumes incomplete delivery from `_state/weekly-delivery.json`.
+- The launchd weekly script intentionally runs daily first; if daily fails, weekly delivery stops instead of choosing from stale state.
 
 ## Reply Commands
 

@@ -13,12 +13,16 @@
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
-    <integer>2</integer>
+    <integer>1</integer>
     <key>Hour</key>
     <integer>9</integer>
     <key>Minute</key>
     <integer>0</integer>
   </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>1800</integer>
   <key>StandardOutPath</key>
   <string>/path/to/reading-librarian/_state/launchd-weekly.out.log</string>
   <key>StandardErrorPath</key>

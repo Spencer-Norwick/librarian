@@ -20,6 +20,7 @@ librarian ingest
 librarian ingest --apply
 librarian status
 librarian weekly
+librarian resend-latest
 ```
 
 The installed command is `librarian`. The package also provides `reading-librarian` as a non-breaking alias for environments where the generic command name conflicts.
@@ -83,7 +84,7 @@ Useful optional flags:
 Local weekly delivery example:
 
 ```bash
-librarian weekly --apply --notify-mac --open --message-self
+librarian weekly-due --apply --notify-mac --open --message-self
 ```
 
 ## Metadata Pipeline

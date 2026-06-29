@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -116,7 +117,7 @@ class LibrarianCliTests(unittest.TestCase):
 
         self.assertEqual(readme_markdown(), readme)
         self.assertEqual(agents_markdown(), agents)
-        self.assertIn("librarian weekly --apply --notify-mac --open --message-self", readme)
+        self.assertIn("librarian weekly-due --apply --notify-mac --open --message-self", readme)
         self.assertIn(".epub` and `.docx`: ingest plus lightweight stdlib text extraction", readme)
 
     def test_package_keeps_librarian_command_and_alias(self) -> None:
@@ -783,11 +784,116 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(commands[0][:2], ["osascript", "-e"])
             self.assertEqual(commands[1][0], "open")
             self.assertEqual(commands[2][:2], ["osascript", "-e"])
-            self.assertIn("Read of the Week: Never Sent", commands[2][2])
-            self.assertIn("-----\\nLibrary status", commands[2][2])
-            self.assertIn("This work: First time in the digest; never skipped.", commands[2][2])
-            self.assertIn("Library: 1 total works; 1 sent; 0 read; 1 unread; 0 skipped.", commands[2][2])
-            self.assertNotIn("Draft:", commands[2][2])
+            self.assertIn("Read of the Week: Never Sent", commands[2][4])
+            self.assertIn("-----\nLibrary status", commands[2][4])
+            self.assertIn("This work: First time in the digest; never skipped.", commands[2][4])
+            self.assertIn("Library: 1 total works; 1 sent; 0 read; 1 unread; 0 skipped.", commands[2][4])
+            self.assertNotIn("Draft:", commands[2][4])
+
+    def test_weekly_message_delivery_passes_unicode_as_osascript_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(summary="A digest summary mentioning Libération and other accented text.")
+            (root / "library" / entry.filename).write_text("reading file", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch("librarian.cli.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = ""
+                run.return_value.stderr = ""
+                code, _ = self.run_cli(root, "weekly", "--apply", "--message-self")
+
+            self.assertEqual(code, 0)
+            command = run.call_args.args[0]
+            self.assertEqual(command[:2], ["osascript", "-e"])
+            self.assertNotIn("\\u", command[2])
+            self.assertEqual(command[3], "me@example.com")
+            self.assertIn("Libération", command[4])
+
+    def test_weekly_delivery_failure_keeps_pick_unsent_and_retries_incomplete_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(summary="A digest summary mentioning Libération and retry behavior.")
+            (root / "library" / entry.filename).write_text("reading file", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            ok = subprocess.CompletedProcess(["osascript"], 0, "", "")
+            failed = subprocess.CompletedProcess(["osascript"], 1, "", "syntax error")
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch("librarian.cli.subprocess.run") as run:
+                run.side_effect = [ok, ok, failed]
+                code, output = self.run_cli(root, "weekly-due", "--apply", "--notify-mac", "--open", "--message-self")
+
+            self.assertEqual(code, 2)
+            self.assertIn("Messages send failed", output)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].sent, "never")
+            self.assertNotIn(entry.filename, (root / "_state" / "sent-log.md").read_text(encoding="utf-8"))
+            state = json.loads((root / "_state" / "weekly-delivery.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["completed_steps"], ["notify_mac", "open"])
+            self.assertIn("Messages send failed", state["last_error"])
+
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch("librarian.cli.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = ""
+                run.return_value.stderr = ""
+                code, output = self.run_cli(root, "weekly-due", "--apply", "--notify-mac", "--open", "--message-self")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Retrying pending weekly delivery", output)
+            self.assertIn("Skipped already completed delivery step: Mac notification.", output)
+            self.assertIn("Skipped already completed delivery step: open file.", output)
+            self.assertEqual(len(run.call_args_list), 1)
+            entries = read_index(root / "library" / "index.md")
+            self.assertEqual(entries[0].sent, today())
+            state = json.loads((root / "_state" / "weekly-delivery.json").read_text(encoding="utf-8"))
+            self.assertTrue(state["completed_at"])
+            self.assertEqual(state["last_error"], "")
+
+    def test_resend_latest_dry_run_prints_message_without_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(sent="2026-01-01")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                f"# Sent Log\n\n- 2026-01-01T09:00:00 — `{entry.filename}` drafted as `draft.md`\n",
+                encoding="utf-8",
+            )
+
+            with patch("librarian.cli.subprocess.run") as run:
+                code, output = self.run_cli(root, "resend-latest")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] Resend latest digest: Never Sent by B, Author", output)
+            self.assertIn("Read of the Week: Never Sent", output)
+            self.assertIn("Dry run only", output)
+            self.assertFalse(run.called)
+
+    def test_resend_latest_apply_sends_latest_digest_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(sent="2026-01-01", summary="A digest summary mentioning Libération.")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            (root / "_state" / "sent-log.md").write_text(
+                f"# Sent Log\n\n- 2026-01-01T09:00:00 — `{entry.filename}` drafted as `draft.md`\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch("librarian.cli.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = ""
+                run.return_value.stderr = ""
+                code, output = self.run_cli(root, "resend-latest", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Sent Messages notification.", output)
+            command = run.call_args.args[0]
+            self.assertEqual(command[:2], ["osascript", "-e"])
+            self.assertEqual(command[3], "me@example.com")
+            self.assertIn("Libération", command[4])
 
     def test_digest_history_counts_prior_sends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

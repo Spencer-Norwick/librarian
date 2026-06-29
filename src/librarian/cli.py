@@ -1094,6 +1094,23 @@ def command_weekly(args: argparse.Namespace, root: Path) -> int:
             notify_mac=args.notify_mac,
             open=args.open,
             message_self=args.message_self,
+            due_only=False,
+        ),
+        root,
+    )
+
+
+def command_weekly_due(args: argparse.Namespace, root: Path) -> int:
+    return command_digest(
+        argparse.Namespace(
+            apply=args.apply,
+            allow_repeats=False,
+            notify=not args.no_notify,
+            email=args.email,
+            notify_mac=args.notify_mac,
+            open=args.open,
+            message_self=args.message_self,
+            due_only=True,
         ),
         root,
     )
@@ -1282,7 +1299,21 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     ensure_dirs(config)
     entries = read_index(config.index)
     before_entries = [replace_entry(entry) for entry in entries]
-    plan = build_digest_plan(config, entries, allow_repeats=args.allow_repeats)
+    delivery_state = load_weekly_delivery_state(config)
+    pending = pending_weekly_delivery(delivery_state, config)
+    if getattr(args, "due_only", False) and not pending and weekly_delivery_already_complete(config, delivery_state):
+        print(f"Weekly delivery already completed for {current_week_id()}.")
+        return 0
+
+    if pending:
+        plan = pending_digest_plan(config, entries, pending)
+        if not plan:
+            raise ValueError("Pending weekly delivery references a missing or no-longer-ready library entry.")
+        delivery_steps = list(pending.get("requested_steps", []))
+        print(f"Retrying pending weekly delivery: {plan.entry.display_title} by {plan.entry.author}")
+    else:
+        plan = build_digest_plan(config, entries, allow_repeats=args.allow_repeats)
+        delivery_steps = requested_delivery_steps(args)
 
     if not plan:
         print("No digest-ready unread works found. Run `librarian enrich --apply` or ingest new files with `librarian ingest --enrich --apply`.")
@@ -1293,18 +1324,18 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
                 print(f"- {line}")
         return 1
 
-    if args.apply and args.email:
+    if args.apply and "email" in delivery_steps:
         require_email_config(config)
-    if args.apply and args.message_self:
+    if args.apply and "message_self" in delivery_steps:
         require_message_config(config)
     prefix = "[dry-run] " if not args.apply else ""
     print(f"{prefix}Digest pick: {plan.entry.display_title} by {plan.entry.author}")
     print(f"{prefix}Draft path: {plan.draft_path.relative_to(root)}")
-    if args.notify_mac:
+    if "notify_mac" in delivery_steps:
         print(f"{prefix}Mac notification: {plan.entry.display_title}")
-    if args.open:
+    if "open" in delivery_steps:
         print(f"{prefix}Open file: {(config.library / plan.entry.filename).relative_to(root)}")
-    if args.message_self:
+    if "message_self" in delivery_steps:
         recipient = configured_message_recipient(config) or "unconfigured recipient"
         print(f"{prefix}Message self: {recipient}")
     if args.notify:
@@ -1318,17 +1349,32 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
             print("Local delivery not run in dry-run mode.")
         return 0
 
-    write_text_without_overwrite(plan.draft_path, plan.body)
-    if args.email:
-        send_digest_email(config, plan.entry, plan.body)
+    if pending:
+        if not plan.draft_path.exists():
+            write_text_without_overwrite(plan.draft_path, plan.body)
+            print(f"Recreated missing draft {plan.draft_path.relative_to(root)}.")
+        else:
+            print(f"Using pending draft {plan.draft_path.relative_to(root)}.")
+    else:
+        write_text_without_overwrite(plan.draft_path, plan.body)
+        if delivery_steps:
+            delivery_state = start_weekly_delivery_state(config, plan, delivery_steps, root)
+            save_weekly_delivery_state(config, delivery_state)
+        print(f"Wrote {plan.draft_path.relative_to(root)}.")
+
+    if delivery_steps:
+        delivery_state = load_weekly_delivery_state(config)
+        run_delivery_steps(config, plan, root, delivery_steps, delivery_state)
+
     plan.entry.sent = today()
     entries = upsert_entry(entries, plan.entry)
     write_index(config.index, entries)
-    append_sent_log(config.sent_log, plan.entry, plan.draft_path, emailed=args.email)
-    print(f"Wrote {plan.draft_path.relative_to(root)}.")
-    if args.email:
-        print("Sent digest email.")
-    run_local_delivery(config, plan, root, args)
+    append_sent_log(config.sent_log, plan.entry, plan.draft_path, emailed="email" in delivery_steps)
+    if delivery_steps:
+        delivery_state = load_weekly_delivery_state(config)
+        delivery_state["completed_at"] = now_stamp()
+        delivery_state["last_error"] = ""
+        save_weekly_delivery_state(config, delivery_state)
     print(render_run_summary("Weekly summary", config, before_entries, entries))
     return 0
 
@@ -1411,6 +1457,32 @@ def command_reply(args: argparse.Namespace, root: Path) -> int:
     print(f"Wrote {plan.draft_path.relative_to(root)}.")
     if args.email:
         print("Sent digest email.")
+    return 0
+
+
+def command_resend_latest(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    ensure_dirs(config)
+    entries = read_index(config.index)
+    current = latest_sent_entry(config, entries)
+    if not current:
+        print("No sent digest found. Run `librarian weekly --apply` before resending.")
+        return 1
+
+    recipient = configured_message_recipient(config) or "unconfigured recipient"
+    history = digest_history(config, current)
+    status = build_library_status(config, entries, current_pick=current)
+    message = render_self_message(current, Path(), history, status)
+    prefix = "[dry-run] " if not args.apply else ""
+    print(f"{prefix}Resend latest digest: {current.display_title} by {current.author}")
+    print(f"{prefix}Message self: {recipient}")
+    print(message)
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to send the Messages notification.")
+        return 0
+
+    send_message_to_self(config, current, Path(), history)
+    print("Sent Messages notification.")
     return 0
 
 
@@ -1610,6 +1682,170 @@ def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: b
     status = build_library_status(config, entries, current_pick=pick)
     draft = digest_draft(pick, config.library / pick.filename, history, status)
     return DigestPlan(pick, draft_path, draft, history)
+
+
+def pending_digest_plan(config: Config, entries: list[WorkEntry], state: dict[str, object]) -> DigestPlan | None:
+    filename = str(state.get("filename") or "")
+    draft_path = Path(str(state.get("draft_path") or ""))
+    if not draft_path.is_absolute():
+        draft_path = config.state.parent / draft_path
+    entry = next((item for item in entries if item.filename == filename and entry_digest_ready(item)), None)
+    if not entry:
+        return None
+    history = digest_history(config, entry)
+    status = build_library_status(config, entries, current_pick=entry)
+    body = draft_path.read_text(encoding="utf-8") if draft_path.exists() else digest_draft(entry, config.library / entry.filename, history, status)
+    return DigestPlan(entry, draft_path, body, history)
+
+
+def requested_delivery_steps(args: argparse.Namespace) -> list[str]:
+    steps: list[str] = []
+    if args.email:
+        steps.append("email")
+    if args.notify_mac:
+        steps.append("notify_mac")
+    if args.open:
+        steps.append("open")
+    if args.message_self:
+        steps.append("message_self")
+    return steps
+
+
+def weekly_delivery_state_path(config: Config) -> Path:
+    return config.state / "weekly-delivery.json"
+
+
+def load_weekly_delivery_state(config: Config) -> dict[str, object]:
+    path = weekly_delivery_state_path(config)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_weekly_delivery_state(config: Config, state: dict[str, object]) -> None:
+    write_text_atomic(weekly_delivery_state_path(config), json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def pending_weekly_delivery(state: dict[str, object], config: Config) -> dict[str, object] | None:
+    if not state or state.get("completed_at"):
+        return None
+    requested = [step for step in state.get("requested_steps", []) if isinstance(step, str)]
+    if not requested:
+        return None
+    draft_path = Path(str(state.get("draft_path") or ""))
+    if not draft_path.is_absolute():
+        draft_path = config.state.parent / draft_path
+    if not state.get("filename") or not draft_path:
+        return None
+    return state
+
+
+def current_week_id() -> str:
+    year, week, _ = dt.date.fromisoformat(today()).isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def weekly_completed_this_week(state: dict[str, object]) -> bool:
+    return bool(state.get("completed_at") and state.get("week") == current_week_id())
+
+
+def weekly_delivery_already_complete(config: Config, state: dict[str, object]) -> bool:
+    return weekly_completed_this_week(state) or sent_log_has_current_week(config.sent_log)
+
+
+def sent_log_has_current_week(path: Path) -> bool:
+    if not path.exists():
+        return False
+    current_year, current_week, _ = dt.date.fromisoformat(today()).isocalendar()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"- (\d{4}-\d{2}-\d{2})T", line)
+        if not match:
+            continue
+        year, week, _ = dt.date.fromisoformat(match.group(1)).isocalendar()
+        if year == current_year and week == current_week:
+            return True
+    return False
+
+
+def start_weekly_delivery_state(config: Config, plan: DigestPlan, steps: list[str], root: Path) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "week": current_week_id(),
+        "filename": plan.entry.filename,
+        "draft_path": str(plan.draft_path.relative_to(root)),
+        "requested_steps": steps,
+        "completed_steps": [],
+        "created_at": now_stamp(),
+        "completed_at": "",
+        "last_error": "",
+    }
+
+
+def completed_delivery_steps(state: dict[str, object]) -> set[str]:
+    return set(completed_delivery_step_list(state))
+
+
+def completed_delivery_step_list(state: dict[str, object]) -> list[str]:
+    return [step for step in state.get("completed_steps", []) if isinstance(step, str)]
+
+
+def mark_delivery_step(config: Config, state: dict[str, object], step: str) -> None:
+    completed = completed_delivery_step_list(state)
+    if step not in completed:
+        completed.append(step)
+    state["completed_steps"] = completed
+    state["last_error"] = ""
+    save_weekly_delivery_state(config, state)
+
+
+def mark_delivery_error(config: Config, state: dict[str, object], error: Exception) -> None:
+    state["last_error"] = one_line(str(error))
+    save_weekly_delivery_state(config, state)
+
+
+def run_delivery_steps(config: Config, plan: DigestPlan, root: Path, steps: list[str], state: dict[str, object]) -> None:
+    completed = completed_delivery_steps(state)
+    for step in steps:
+        if step in completed:
+            print(f"Skipped already completed delivery step: {delivery_step_label(step)}.")
+            continue
+        try:
+            run_delivery_step(config, plan, root, step)
+        except Exception as exc:
+            mark_delivery_error(config, state, exc)
+            raise
+        mark_delivery_step(config, state, step)
+
+
+def delivery_step_label(step: str) -> str:
+    labels = {
+        "email": "email",
+        "notify_mac": "Mac notification",
+        "open": "open file",
+        "message_self": "Messages notification",
+    }
+    return labels.get(step, step)
+
+
+def run_delivery_step(config: Config, plan: DigestPlan, root: Path, step: str) -> None:
+    if step == "email":
+        send_digest_email(config, plan.entry, plan.body)
+        print("Sent digest email.")
+    elif step == "notify_mac":
+        send_mac_notification(plan.entry, plan.draft_path)
+        print("Posted Mac notification.")
+    elif step == "open":
+        open_local_file(config.library / plan.entry.filename)
+        print(f"Opened {Path(plan.entry.filename).name}.")
+    elif step == "message_self":
+        send_message_to_self(config, plan.entry, plan.draft_path, plan.history)
+        print("Sent Messages notification.")
+    else:
+        raise ValueError(f"Unknown delivery step: {step}")
 
 
 def digest_blocker_guidance(entries: list[WorkEntry], limit: int = 3) -> list[str]:
@@ -1835,26 +2071,14 @@ def render_digest_notification(entry: WorkEntry, draft_path: Path, history: Dige
     )
 
 
-def run_local_delivery(config: Config, plan: DigestPlan, root: Path, args: argparse.Namespace) -> None:
-    if args.notify_mac:
-        send_mac_notification(plan.entry, plan.draft_path)
-        print("Posted Mac notification.")
-    if args.open:
-        open_local_file(config.library / plan.entry.filename)
-        print(f"Opened {Path(plan.entry.filename).name}.")
-    if args.message_self:
-        send_message_to_self(config, plan.entry, plan.draft_path, plan.history)
-        print("Sent Messages notification.")
-
-
 def send_mac_notification(entry: WorkEntry, draft_path: Path) -> None:
+    del draft_path
     script = (
-        'display notification '
-        f'{applescript_literal(first_primer_prompt(entry))} '
-        'with title "Read of the Week" '
-        f'subtitle {applescript_literal(entry.display_title)}'
+        "on run argv\n"
+        '  display notification (item 1 of argv) with title "Read of the Week" subtitle (item 2 of argv)\n'
+        "end run"
     )
-    run_osascript(script, "Mac notification failed")
+    run_osascript(script, "Mac notification failed", first_primer_prompt(entry), entry.display_title)
 
 
 def open_local_file(path: Path) -> None:
@@ -1869,13 +2093,15 @@ def send_message_to_self(config: Config, entry: WorkEntry, draft_path: Path, his
     status = build_library_status(config, read_index(config.index), current_pick=entry)
     message = render_self_message(entry, draft_path, history, status)
     script = (
+        "on run argv\n"
         'tell application "Messages"\n'
-        f"  set targetBuddy to {applescript_literal(recipient)}\n"
+        "  set targetBuddy to item 1 of argv\n"
         '  set targetService to 1st service whose service type = iMessage\n'
-        f"  send {applescript_literal(message)} to buddy targetBuddy of targetService\n"
+        "  send (item 2 of argv) to buddy targetBuddy of targetService\n"
         "end tell"
+        "\nend run"
     )
-    run_osascript(script, "Messages send failed")
+    run_osascript(script, "Messages send failed", recipient, message)
 
 
 def render_self_message(entry: WorkEntry, draft_path: Path, history: DigestHistory, status: LibraryStatus) -> str:
@@ -1891,15 +2117,11 @@ def render_self_message(entry: WorkEntry, draft_path: Path, history: DigestHisto
     )
 
 
-def run_osascript(script: str, error_prefix: str) -> None:
-    completed = subprocess.run(["osascript", "-e", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+def run_osascript(script: str, error_prefix: str, *args: str) -> None:
+    completed = subprocess.run(["osascript", "-e", script, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
     if completed.returncode != 0:
         details = one_line(completed.stderr.strip() or completed.stdout.strip())
         raise ValueError(f"{error_prefix}: {details}")
-
-
-def applescript_literal(value: str) -> str:
-    return json.dumps(value)
 
 
 def configured_message_recipient(config: Config) -> str:
@@ -2073,6 +2295,14 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
     weekly.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
+    weekly_due = sub.add_parser("weekly-due")
+    weekly_due.add_argument("--apply", action="store_true")
+    weekly_due.add_argument("--no-notify", action="store_true")
+    weekly_due.add_argument("--email", action="store_true")
+    weekly_due.add_argument("--notify-mac", action="store_true", help="Post a macOS notification after writing the weekly draft.")
+    weekly_due.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
+    weekly_due.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
+
     enrich = sub.add_parser("enrich")
     enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
     enrich.add_argument("--apply", action="store_true")
@@ -2108,6 +2338,9 @@ def build_parser() -> argparse.ArgumentParser:
     reply.add_argument("--allow-repeats", action="store_true")
     reply.add_argument("--no-notify", action="store_true")
     reply.add_argument("--email", action="store_true")
+
+    resend = sub.add_parser("resend-latest")
+    resend.add_argument("--apply", action="store_true")
 
     sub.add_parser("list")
     sub.add_parser("status")
@@ -2148,12 +2381,16 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_repair(args, root)
         if args.command == "weekly":
             return command_weekly(args, root)
+        if args.command == "weekly-due":
+            return command_weekly_due(args, root)
         if args.command == "weekly-pick":
             return command_weekly_pick(args, root)
         if args.command == "digest":
             return command_digest(args, root)
         if args.command == "reply":
             return command_reply(args, root)
+        if args.command == "resend-latest":
+            return command_resend_latest(args, root)
         if args.command == "enrich":
             return command_enrich(args, root)
         if args.command == "ocr":

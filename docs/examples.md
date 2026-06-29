@@ -64,11 +64,17 @@ librarian weekly
 Local delivery, only after review:
 
 ```bash
-librarian weekly --apply --notify-mac --open --message-self
+librarian weekly-due --apply --notify-mac --open --message-self
 ```
 
 Email remains explicit optional behavior:
 
 ```bash
 librarian weekly --email --apply
+```
+
+Resend the latest digest text to Messages after a delivery failure:
+
+```bash
+librarian resend-latest --apply
 ```
