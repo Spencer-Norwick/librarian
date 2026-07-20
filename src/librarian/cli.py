@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -111,6 +112,9 @@ def command_ingest(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
     use_model_enrichment = args.enrich or config.use_model_assistance
+    if use_model_enrichment and not model_enrichment_approved(config, explicitly_requested=args.enrich):
+        print(f"Model enrichment skipped: {model_approval_message()}")
+        use_model_enrichment = False
     if use_model_enrichment and not config.model_command:
         print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
         return 2
@@ -144,14 +148,58 @@ def command_ingest(args: argparse.Namespace, root: Path) -> int:
         print("Dry run only. Re-run with --apply to move files and update Markdown.")
         return 0
 
-    for source, target, entry in plans:
-        move_without_overwrite(source, target)
-        entries = upsert_entry(entries, entry)
-        append_ingest_log(config.ingest_log, source.name, entry, target)
-
-    write_index(config.index, entries)
+    apply_ingest_plans(config, entries, plans)
     print(f"Applied ingest for {len(plans)} file(s).")
     return 0
+
+
+def apply_ingest_plans(config: Config, entries: list[WorkEntry], plans: list[tuple[Path, Path, WorkEntry]]) -> None:
+    index_before = read_optional_text(config.index)
+    log_before = read_optional_text(config.ingest_log)
+    moved: list[tuple[Path, Path]] = []
+    updated_entries = list(entries)
+    log_text = log_before or "# Ingest Log\n\n"
+    try:
+        for source, target, entry in plans:
+            move_without_overwrite(source, target)
+            moved.append((source, target))
+            updated_entries = upsert_entry(updated_entries, entry)
+            log_text += ingest_log_line(source.name, entry, target)
+        write_index(config.index, updated_entries)
+        write_text_atomic(config.ingest_log, log_text)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for source, target in reversed(moved):
+            try:
+                if target.exists() and not source.exists():
+                    move_without_overwrite(target, source)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{target.name}: {one_line(str(rollback_exc))}")
+        try:
+            restore_optional_text(config.index, index_before)
+            restore_optional_text(config.ingest_log, log_before)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"Markdown state: {one_line(str(rollback_exc))}")
+        if rollback_errors:
+            details = "; ".join(rollback_errors)
+            raise RuntimeError(f"Ingest failed and rollback was incomplete: {details}") from exc
+        raise
+
+
+def read_optional_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def restore_optional_text(path: Path, content: str | None) -> None:
+    if content is not None:
+        write_text_atomic(path, content)
+
+
+def ingest_log_line(original: str, entry: WorkEntry, target: Path) -> str:
+    return (
+        f"- {now_stamp()} — {inline_code(original)} -> {inline_code(target.name)}; "
+        f"{one_line(entry.author)}; {one_line(entry.title)}; {one_line(entry.year)}; {one_line(entry.work_type)}\n"
+    )
 
 
 def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, use_model_enrichment: bool = False) -> WorkEntry:
@@ -530,15 +578,6 @@ def normalize_tag(value: str) -> str:
     return value[:32]
 
 
-def append_ingest_log(path: Path, original: str, entry: WorkEntry, target: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            f"- {now_stamp()} — {inline_code(original)} -> {inline_code(target.name)}; "
-            f"{one_line(entry.author)}; {one_line(entry.title)}; {one_line(entry.year)}; {one_line(entry.work_type)}\n"
-        )
-
-
 def command_lint(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
@@ -733,6 +772,9 @@ def command_reindex(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
     use_model_enrichment = args.enrich or config.use_model_assistance
+    if use_model_enrichment and not model_enrichment_approved(config, explicitly_requested=args.enrich):
+        print(f"Model enrichment skipped: {model_approval_message()}")
+        use_model_enrichment = False
     if use_model_enrichment and not config.model_command:
         print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
         return 2
@@ -768,6 +810,9 @@ def command_maintain(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
     ensure_dirs(config)
     use_model_enrichment = args.enrich or config.use_model_assistance
+    if use_model_enrichment and not model_enrichment_approved(config, explicitly_requested=args.enrich):
+        print(f"Model enrichment skipped: {model_approval_message()}")
+        use_model_enrichment = False
     if use_model_enrichment and not config.model_command:
         print("Model enrichment requires `model_command` in _state/config.toml or LIBRARIAN_MODEL_COMMAND.")
         return 2
@@ -878,6 +923,9 @@ def command_daily(args: argparse.Namespace, root: Path) -> int:
     before_inbox = len(supported_files(config, config.inbox))
     auto_lookup = args.lookup or config.use_catalog_lookup
     auto_enrich = args.enrich or config.use_model_assistance
+    if auto_enrich and not model_enrichment_approved(config, explicitly_requested=args.enrich):
+        print("Daily workflow: model enrichment skipped; external model approval is required. Run with --enrich to approve this batch.")
+        auto_enrich = False
     if auto_enrich and not config.model_command:
         print("Daily workflow: model enrichment skipped; model_command is not configured.")
         auto_enrich = False
@@ -1082,6 +1130,18 @@ def apply_targeted_enrichment(config: Config, entries: list[WorkEntry]) -> list[
         entry.next_action = "clean"
         changed.append(entry)
     return changed
+
+
+def model_enrichment_approved(config: Config, explicitly_requested: bool) -> bool:
+    return explicitly_requested or not config.require_external_model_approval
+
+
+def model_approval_message() -> str:
+    return (
+        "External model approval is required before sending real-file excerpts. "
+        "Re-run with --enrich to approve this batch, or set require_external_model_approval = false "
+        "for trusted automatic enrichment."
+    )
 
 
 def command_weekly(args: argparse.Namespace, root: Path) -> int:
@@ -1779,6 +1839,7 @@ def start_weekly_delivery_state(config: Config, plan: DigestPlan, steps: list[st
         "draft_path": str(plan.draft_path.relative_to(root)),
         "requested_steps": steps,
         "completed_steps": [],
+        "in_progress_step": "",
         "created_at": now_stamp(),
         "completed_at": "",
         "last_error": "",
@@ -1798,11 +1859,13 @@ def mark_delivery_step(config: Config, state: dict[str, object], step: str) -> N
     if step not in completed:
         completed.append(step)
     state["completed_steps"] = completed
+    state["in_progress_step"] = ""
     state["last_error"] = ""
     save_weekly_delivery_state(config, state)
 
 
 def mark_delivery_error(config: Config, state: dict[str, object], error: Exception) -> None:
+    state["in_progress_step"] = ""
     state["last_error"] = one_line(str(error))
     save_weekly_delivery_state(config, state)
 
@@ -1813,12 +1876,30 @@ def run_delivery_steps(config: Config, plan: DigestPlan, root: Path, steps: list
         if step in completed:
             print(f"Skipped already completed delivery step: {delivery_step_label(step)}.")
             continue
+        interrupted_step = str(state.get("in_progress_step") or "")
+        if interrupted_step == step:
+            if step != "email" or not email_idempotency_window_open(state):
+                raise ValueError(
+                    f"Previous {delivery_step_label(step)} attempt was interrupted and its outcome is unknown. "
+                    "Review the delivery, then clear in_progress_step in _state/weekly-delivery.json to retry."
+                )
+        state["in_progress_step"] = step
+        state["last_error"] = ""
+        save_weekly_delivery_state(config, state)
         try:
             run_delivery_step(config, plan, root, step)
         except Exception as exc:
             mark_delivery_error(config, state, exc)
             raise
         mark_delivery_step(config, state, step)
+
+
+def email_idempotency_window_open(state: dict[str, object]) -> bool:
+    try:
+        created = dt.datetime.fromisoformat(str(state.get("created_at") or ""))
+    except ValueError:
+        return False
+    return dt.datetime.now() - created < dt.timedelta(hours=23)
 
 
 def delivery_step_label(step: str) -> str:
@@ -2151,6 +2232,7 @@ def send_digest_email(config: Config, entry: WorkEntry, body: str) -> None:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "Idempotency-Key": digest_email_idempotency_key(entry),
             "User-Agent": "reading-librarian/0.1 (+local CLI)",
         },
         method="POST",
@@ -2161,6 +2243,11 @@ def send_digest_email(config: Config, entry: WorkEntry, body: str) -> None:
                 raise ValueError(f"Email delivery failed with HTTP {response.status}.")
     except Exception as exc:
         raise ValueError(f"Email delivery failed: {exc}") from exc
+
+
+def digest_email_idempotency_key(entry: WorkEntry) -> str:
+    identity = f"{current_week_id()}\0{entry.filename}".encode("utf-8")
+    return f"reading-librarian/{current_week_id()}/{hashlib.sha256(identity).hexdigest()[:24]}"
 
 
 def require_email_config(config: Config | None = None) -> tuple[str, str, str]:
@@ -2405,6 +2492,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_mark(args, root, "read")
         if args.command == "skip":
             return command_mark(args, root, "skipped")
+    except OSError as exc:
+        print(f"OPERATION_ERROR: {exc}")
+        return 2
     except ValueError as exc:
         print(f"CONFIG_ERROR: {exc}")
         return 2

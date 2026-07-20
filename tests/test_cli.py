@@ -256,6 +256,36 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertIn("`Ong_Walter_OralityAndLiteracy_1982_book.txt`", log_text)
             self.assertIn("`OngWalter_OralityAndLiteracy_1982_book.txt`", log_text)
 
+    def test_ingest_rolls_back_files_and_markdown_when_index_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "Ong_Walter_OralityAndLiteracy_1982_book.txt"
+            source.write_text("Writing restructures consciousness.", encoding="utf-8")
+            index_before = (root / "library" / "index.md").read_text(encoding="utf-8")
+            log_before = (root / "_state" / "ingest-log.md").read_text(encoding="utf-8")
+
+            with patch("librarian.cli.write_index", side_effect=OSError("synthetic write failure")):
+                code, output = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 2)
+            self.assertIn("synthetic write failure", output)
+            self.assertTrue(source.exists())
+            self.assertFalse((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
+            self.assertEqual((root / "library" / "index.md").read_text(encoding="utf-8"), index_before)
+            self.assertEqual((root / "_state" / "ingest-log.md").read_text(encoding="utf-8"), log_before)
+
+    def test_index_round_trip_preserves_added_date_and_review_notes(self) -> None:
+        entry = self.ready_entry(added="2026-07-20", needs_review=["Verify translated title."])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.md"
+            path.write_text(render_index([entry]), encoding="utf-8")
+            restored = read_index(path)[0]
+
+        self.assertEqual(restored.added, "2026-07-20")
+        self.assertEqual(restored.needs_review, ["Verify translated title."])
+
     def test_ingest_epub_extracts_text_without_ocr_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -437,6 +467,28 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Daily workflow: maintain", output)
             self.assertIn("[dry-run] Maintain", output)
+
+    def test_daily_automatic_enrichment_respects_default_approval_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "BakerAnn_AttentionTools_2001_essay.txt"
+            source.write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            config_path = root / "_state" / "config.toml"
+            config_text = config_path.read_text(encoding="utf-8").replace(
+                "use_model_assistance = false", "use_model_assistance = true"
+            )
+            config_path.write_text(config_text, encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": self.fake_model_command(root)}, clear=True), patch(
+                "librarian.cli.try_enrich_from_model"
+            ) as enrich:
+                code, output = self.run_cli(root, "daily", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("external model approval is required", output)
+            enrich.assert_not_called()
+            self.assertEqual(read_index(root / "library" / "index.md")[0].next_action, "needs_model")
 
     def test_collision_gets_stable_hash_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -851,6 +903,38 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertTrue(state["completed_at"])
             self.assertEqual(state["last_error"], "")
 
+    def test_weekly_delivery_does_not_repeat_interrupted_non_idempotent_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / entry.filename).write_text("reading file", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            draft = root / "_output" / "weekly-read-drafts" / "pending.md"
+            draft.write_text("pending digest", encoding="utf-8")
+            state = {
+                "schema_version": 1,
+                "week": "2026-W30",
+                "filename": entry.filename,
+                "draft_path": str(draft.relative_to(root)),
+                "requested_steps": ["message_self"],
+                "completed_steps": [],
+                "in_progress_step": "message_self",
+                "created_at": "2026-07-20T09:00:00",
+                "completed_at": "",
+                "last_error": "",
+            }
+            (root / "_state" / "weekly-delivery.json").write_text(json.dumps(state), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch(
+                "librarian.cli.subprocess.run"
+            ) as run:
+                code, output = self.run_cli(root, "weekly-due", "--apply", "--message-self")
+
+            self.assertEqual(code, 2)
+            self.assertIn("outcome is unknown", output)
+            run.assert_not_called()
+
     def test_resend_latest_dry_run_prints_message_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1041,6 +1125,7 @@ class LibrarianCliTests(unittest.TestCase):
             payload = json.loads(request.data.decode("utf-8"))
             self.assertEqual(payload["from"], "Reading Librarian <reads@example.com>")
             self.assertEqual(payload["to"], ["me@example.com"])
+            self.assertTrue(request.headers["Idempotency-key"].startswith("reading-librarian/"))
 
     def test_digest_skips_unenriched_model_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

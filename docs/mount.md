@@ -132,8 +132,8 @@ Expected output shape:
 
 After the synthetic test passes, check `require_external_model_approval` before sending excerpts from real library files to any external model provider.
 
-- `true` or missing: ask the user for explicit approval before each new real-file enrichment batch.
-- `false`: the user has opted into external model enrichment for the configured `model_command`; still use dry-run review before broad batches.
+- `true` or missing: an explicit `--enrich` approves that real-file enrichment batch; configured automatic enrichment is skipped.
+- `false`: configured automatic enrichment may send excerpts without a per-batch prompt, including from scheduled jobs; still use dry-run review before broad batches.
 
 ## Codex Hook Sandbox Note
 

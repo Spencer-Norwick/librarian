@@ -105,9 +105,10 @@ Each index entry includes `Next action` so humans and agents know the next repai
 - New library files, OCR outputs, and weekly drafts use no-overwrite writes.
 - Supported files in `inbox/` are moved only by `ingest --apply`.
 - `index.md`, ingest logs, sent logs, status logs, and weekly draft state are changed only by commands run with `--apply`.
+- Applied ingest batches roll back moved files and Markdown state when an operation fails.
 - Configured paths are kept inside the project root.
 - Symlinked inbox files are ignored.
-- Model calls happen only when explicitly requested or configured.
+- An explicit `--enrich` approves model use for that batch. Configured automatic model calls run only after `require_external_model_approval = false` is deliberately set.
 - Local notification, file opening, Messages delivery, and email happen only when explicitly requested.
 - Optional catalog lookup uses Open Library only with `--lookup` or local config.
 
