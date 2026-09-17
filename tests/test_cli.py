@@ -261,7 +261,8 @@ class LibrarianCliTests(unittest.TestCase):
             root = Path(tmp)
             self.make_project(root)
 
-            code, output = self.run_cli(root, "mount", "--model", "codex")
+            with patch("librarian.cli.detected_model_commands", return_value={"codex": "synthetic-codex"}):
+                code, output = self.run_cli(root, "mount", "--model", "codex")
 
             self.assertEqual(code, 0)
             self.assertIn("Recommended model command: none", output)

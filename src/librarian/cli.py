@@ -2686,9 +2686,22 @@ def add_weekly_filter_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-minutes", type=nonnegative_minutes, help="Reading-time ceiling in short mode; 0 allows any duration within short-form types.")
 
 
+class CommandHelpFormatter(argparse.HelpFormatter):
+    """Include subcommand indentation in column widths on older Pythons."""
+
+    def add_argument(self, action: argparse.Action) -> None:
+        super().add_argument(action)
+        if action.help is not argparse.SUPPRESS:
+            decolor = getattr(self, "_decolor", lambda value: value)
+            for subaction in self._iter_indented_subactions(action):
+                length = len(decolor(self._format_action_invocation(subaction))) + self._current_indent
+                self._action_max_length = max(self._action_max_length, length)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="librarian",
+        formatter_class=CommandHelpFormatter,
         description="Manage a local, flat-file reading library.",
         epilog=(
             "Run 'librarian COMMAND --help' for command-specific options. "
