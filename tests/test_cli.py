@@ -136,15 +136,16 @@ class LibrarianCliTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "inbox").is_dir())
         self.assertTrue((FIXTURES / "library").is_dir())
 
-    def test_init_document_templates_follow_public_docs(self) -> None:
-        root = FIXTURES.parents[1]
-        readme = (root / "README.md").read_text(encoding="utf-8")
-        agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+    def test_init_templates_describe_private_workspace_and_safety(self) -> None:
+        readme = readme_markdown()
+        agents = agents_markdown()
 
-        self.assertEqual(readme_markdown(), readme)
-        self.assertEqual(agents_markdown(), agents)
-        self.assertIn("librarian weekly-due --apply --notify-mac --open --message-self", readme)
-        self.assertIn(".epub` and `.docx`: ingest plus lightweight stdlib text extraction", readme)
+        self.assertIn("librarian mount --check", readme)
+        self.assertIn("librarian ingest --apply", readme)
+        self.assertIn("Weekly picks need indexed summaries and reading prompts", readme)
+        self.assertIn("require_external_model_approval", agents)
+        self.assertIn("Do not delete reading files automatically", agents)
+        self.assertIn("Preserve original filenames", agents)
 
     def test_package_keeps_librarian_command_and_alias(self) -> None:
         root = FIXTURES.parents[1]

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import ensure_dirs, project_config, sample_config
+from .workspace_templates import workspace_template
 from .domain import (
     WORK_TYPES,
     CatalogMatch,
@@ -98,15 +99,15 @@ def write_if_missing(path: Path, content: str) -> None:
 
 
 def pyproject_text() -> str:
-    return Path(__file__).resolve().parents[2].joinpath("pyproject.toml").read_text(encoding="utf-8")
+    return workspace_template("pyproject.toml")
 
 
 def agents_markdown() -> str:
-    return Path(__file__).resolve().parents[2].joinpath("AGENTS.md").read_text(encoding="utf-8")
+    return workspace_template("AGENTS.md")
 
 
 def readme_markdown() -> str:
-    return Path(__file__).resolve().parents[2].joinpath("README.md").read_text(encoding="utf-8")
+    return workspace_template("README.md")
 
 
 def command_ingest(args: argparse.Namespace, root: Path) -> int:
