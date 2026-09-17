@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -15,6 +17,7 @@ from unittest.mock import patch
 from librarian.cli import (
     WorkEntry,
     agents_markdown,
+    build_parser,
     clean_title,
     filename_convention_ok,
     infer_year_from_text,
@@ -23,13 +26,36 @@ from librarian.cli import (
     readme_markdown,
     render_index,
     today,
+    weekly_entry_eligible,
 )
-from librarian.metadata import useful_pdf_title
+from librarian.config import project_config
+from librarian.extraction import page_has_meaningful_text, pdf_extraction_needs_ocr
+from librarian.metadata import infer_identity_from_front_matter, useful_pdf_title
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class LibrarianCliTests(unittest.TestCase):
+    def test_top_level_help_lists_every_command_with_aligned_explanations(self) -> None:
+        parser = build_parser()
+        commands = next(action.choices for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"COLUMNS": "80"}):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                main(["--help"], root=Path(tmp))
+            self.assertEqual(stopped.exception.code, 0)
+            help_text = output.getvalue()
+            self.assertIn("usage: librarian [-h] COMMAND ...", help_text)
+            self.assertIn("commands:", help_text)
+            self.assertIn("librarian COMMAND --help", help_text)
+            self.assertIn("--apply", help_text)
+            rows = re.findall(r"^    (\S+)( {2,})(\S[^\n]+)$", help_text, re.M)
+            self.assertEqual([name for name, _, _ in rows], list(commands))
+            self.assertEqual(len({len(name) + len(space) for name, space, _ in rows}), 1)
+            self.assertTrue(all(len(description.split()) >= 3 for _, _, description in rows))
+            self.assertTrue(all(len(line) <= 80 for line in help_text.splitlines()))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def run_cli(self, root: Path, *args: str) -> tuple[int, str]:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
@@ -110,15 +136,16 @@ class LibrarianCliTests(unittest.TestCase):
         self.assertTrue((FIXTURES / "inbox").is_dir())
         self.assertTrue((FIXTURES / "library").is_dir())
 
-    def test_init_document_templates_follow_public_docs(self) -> None:
-        root = FIXTURES.parents[1]
-        readme = (root / "README.md").read_text(encoding="utf-8")
-        agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+    def test_init_templates_describe_private_workspace_and_safety(self) -> None:
+        readme = readme_markdown()
+        agents = agents_markdown()
 
-        self.assertEqual(readme_markdown(), readme)
-        self.assertEqual(agents_markdown(), agents)
-        self.assertIn("librarian weekly-due --apply --notify-mac --open --message-self", readme)
-        self.assertIn(".epub` and `.docx`: ingest plus lightweight stdlib text extraction", readme)
+        self.assertIn("librarian mount --check", readme)
+        self.assertIn("librarian ingest --apply", readme)
+        self.assertIn("Weekly picks need indexed summaries and reading prompts", readme)
+        self.assertIn("require_external_model_approval", agents)
+        self.assertIn("Do not delete reading files automatically", agents)
+        self.assertIn("Preserve original filenames", agents)
 
     def test_package_keeps_librarian_command_and_alias(self) -> None:
         root = FIXTURES.parents[1]
@@ -127,6 +154,40 @@ class LibrarianCliTests(unittest.TestCase):
 
         self.assertEqual(scripts["librarian"], "librarian.cli:main")
         self.assertEqual(scripts["reading-librarian"], "librarian.cli:main")
+
+    def test_pdf_copyright_notice_is_not_meaningful_text(self) -> None:
+        notice = "Notice: This material may be protected by Copyright Law (Title 17, U.S. Code)"
+
+        self.assertFalse(page_has_meaningful_text(notice))
+        self.assertTrue(
+            pdf_extraction_needs_ocr(
+                notice,
+                ["Sparse PDF text coverage (0/22 pages); OCR is needed."],
+            )
+        )
+
+    def test_copyright_banner_is_not_front_matter_identity(self) -> None:
+        text = "\n".join(
+            [
+                "Notice: This material may be protected",
+                "by Copyright Law (Title 17, U.S. Code)",
+                "THREE TEMPORALITIES",
+                "83",
+            ]
+        )
+
+        self.assertEqual(infer_identity_from_front_matter(text), {})
+
+    def test_top_level_help_lists_commands_vertically(self) -> None:
+        output = build_parser().format_help()
+
+        self.assertIn("usage: librarian [-h] COMMAND ...", output)
+        self.assertIn("commands:\n  COMMAND", output)
+        self.assertIn("    ingest", output)
+        self.assertIn("Move inbox files into the library and index them.", output)
+        self.assertIn("    status", output)
+        self.assertIn("Show library totals and upcoming readings.", output)
+        self.assertNotIn("{init,mount,ingest", output)
 
     def test_mount_check_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,7 +261,8 @@ class LibrarianCliTests(unittest.TestCase):
             root = Path(tmp)
             self.make_project(root)
 
-            code, output = self.run_cli(root, "mount", "--model", "codex")
+            with patch("librarian.cli.detected_model_commands", return_value={"codex": "synthetic-codex"}):
+                code, output = self.run_cli(root, "mount", "--model", "codex")
 
             self.assertEqual(code, 0)
             self.assertIn("Recommended model command: none", output)
@@ -255,6 +317,36 @@ class LibrarianCliTests(unittest.TestCase):
             log_text = (root / "_state" / "ingest-log.md").read_text(encoding="utf-8")
             self.assertIn("`Ong_Walter_OralityAndLiteracy_1982_book.txt`", log_text)
             self.assertIn("`OngWalter_OralityAndLiteracy_1982_book.txt`", log_text)
+
+    def test_ingest_rolls_back_files_and_markdown_when_index_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "Ong_Walter_OralityAndLiteracy_1982_book.txt"
+            source.write_text("Writing restructures consciousness.", encoding="utf-8")
+            index_before = (root / "library" / "index.md").read_text(encoding="utf-8")
+            log_before = (root / "_state" / "ingest-log.md").read_text(encoding="utf-8")
+
+            with patch("librarian.cli.write_index", side_effect=OSError("synthetic write failure")):
+                code, output = self.run_cli(root, "ingest", "--apply")
+
+            self.assertEqual(code, 2)
+            self.assertIn("synthetic write failure", output)
+            self.assertTrue(source.exists())
+            self.assertFalse((root / "library" / "OngWalter_OralityAndLiteracy_1982_book.txt").exists())
+            self.assertEqual((root / "library" / "index.md").read_text(encoding="utf-8"), index_before)
+            self.assertEqual((root / "_state" / "ingest-log.md").read_text(encoding="utf-8"), log_before)
+
+    def test_index_round_trip_preserves_added_date_and_review_notes(self) -> None:
+        entry = self.ready_entry(added="2026-07-20", needs_review=["Verify translated title."])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.md"
+            path.write_text(render_index([entry]), encoding="utf-8")
+            restored = read_index(path)[0]
+
+        self.assertEqual(restored.added, "2026-07-20")
+        self.assertEqual(restored.needs_review, ["Verify translated title."])
 
     def test_ingest_epub_extracts_text_without_ocr_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -379,6 +471,22 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertEqual(list((root / "_output" / "ocr").glob("*.pdf")), [])
 
+    def test_daily_treats_sparse_boilerplate_pdf_text_as_needing_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "SewellWilliamH_ThreeTemporalitiesTowardAnEventfulSociology_1996_chapter.pdf"
+            source.write_bytes(b"scanned pdf placeholder")
+            notice = "Notice: This material may be protected by Copyright Law (Title 17, U.S. Code)"
+            review = ["Sparse PDF text coverage (0/22 pages); OCR is needed."]
+
+            with patch("librarian.cli.extract_pdf", return_value=({}, notice, review)):
+                code, output = self.run_cli(root, "daily")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] OCR inbox PDF", output)
+            self.assertTrue(source.exists())
+
     def test_daily_apply_ocr_prepares_scanned_pdf_before_ingest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -437,6 +545,28 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Daily workflow: maintain", output)
             self.assertIn("[dry-run] Maintain", output)
+
+    def test_daily_automatic_enrichment_respects_default_approval_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "BakerAnn_AttentionTools_2001_essay.txt"
+            source.write_text("This essay develops a focused argument about reading tools and attention.", encoding="utf-8")
+            config_path = root / "_state" / "config.toml"
+            config_text = config_path.read_text(encoding="utf-8").replace(
+                "use_model_assistance = false", "use_model_assistance = true"
+            )
+            config_path.write_text(config_text, encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": self.fake_model_command(root)}, clear=True), patch(
+                "librarian.cli.try_enrich_from_model"
+            ) as enrich:
+                code, output = self.run_cli(root, "daily", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("external model approval is required", output)
+            enrich.assert_not_called()
+            self.assertEqual(read_index(root / "library" / "index.md")[0].next_action, "needs_model")
 
     def test_collision_gets_stable_hash_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,6 +735,171 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Never Sent", output)
             self.assertNotIn("[dry-run] Weekly pick: Already Sent", output)
+
+    def test_short_weekly_eligibility_types_times_and_excerpts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config = project_config(root)
+            config.weekly_mode = "short"
+            for work_type in ("essay", "article", "story", "paper", "chapter", "excerpt"):
+                with self.subTest(work_type=work_type):
+                    self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type=work_type, reading_time="~60m")))
+                    self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type=work_type, reading_time="~61m")))
+            for time in ("~0m", "unknown", "", "~61m"):
+                self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type="essay", reading_time=time)))
+            self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type="book", reading_time="~10m", summary="This excerpt introduces a book about creative work and its many possible meanings.")))
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="book", title="Art (Excerpt)", reading_time="~30m")))
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="book", tags=["excerpt"], reading_time="~30m")))
+            config.weekly_max_minutes = 0
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="excerpt", reading_time="unknown")))
+            self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type="book", reading_time="~10m")))
+            config.weekly_mode = "all"
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="book", reading_time="~500m")))
+
+    def test_mount_weekly_preferences_preserve_other_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            path = root / "_state" / "config.toml"
+            original = path.read_text().replace("model_command = []", 'model_command = ["custom-hook"]')
+            original = original.replace("use_model_assistance = false", "use_model_assistance = true")
+            path.write_text(original)
+            code, output = self.run_cli(root, "mount", "--weekly-mode", "short", "--weekly-max-minutes", "30")
+            self.assertEqual(code, 0)
+            self.assertIn('weekly_mode = "short"', output)
+            self.assertEqual(path.read_text(), original)
+            code, _ = self.run_cli(root, "mount", "--weekly-mode", "short", "--weekly-max-minutes", "30", "--apply")
+            self.assertEqual(code, 0)
+            expected = tomllib.loads(original)
+            expected["behavior"].update(weekly_mode="short", weekly_max_minutes=30)
+            self.assertEqual(tomllib.loads(path.read_text()), expected)
+
+    def test_weekly_filter_applies_to_all_pickers_status_and_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config_path = root / "_state" / "config.toml"
+            config_path.write_text(config_path.read_text().replace('weekly_mode = "all"', 'weekly_mode = "short"'))
+            before_config = config_path.read_text()
+            entries = [
+                self.ready_entry(author="A, Author", title="Long Book", filename="A_LongBook_2000_book.txt", work_type="book", reading_time="~250m"),
+                self.ready_entry(author="B, Author", title="Short Essay", filename="B_ShortEssay_2000_essay.txt", work_type="essay", reading_time="~25m"),
+            ]
+            index = root / "library" / "index.md"
+            index.write_text(render_index(entries))
+            before_index = index.read_text()
+            for command in ("weekly", "weekly-due", "weekly-pick", "digest"):
+                with self.subTest(command=command):
+                    code, output = self.run_cli(root, command)
+                    self.assertEqual(code, 0)
+                    self.assertIn("Digest pick: Short Essay", output)
+                    code, output = self.run_cli(root, command, "--mode", "all")
+                    self.assertEqual(code, 0)
+                    self.assertIn("Digest pick: Long Book", output)
+                    code, output = self.run_cli(root, command, "--max-minutes", "20")
+                    self.assertEqual(code, 1)
+                    self.assertIn("No eligible short readings", output)
+            code, output = self.run_cli(root, "status")
+            self.assertEqual(code, 0)
+            self.assertIn("Next weekly pick: Short Essay", output)
+            self.assertIn("Digest-ready: 1; unsent ready: 1", output)
+            self.assertEqual(index.read_text(), before_index)
+            self.assertEqual(config_path.read_text(), before_config)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").iterdir()), [])
+
+    def test_short_weekly_no_fallback_or_writes_even_with_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            index = root / "library" / "index.md"
+            index.write_text(render_index([self.ready_entry(work_type="book", reading_time="~200m", sent="2026-01-01")]))
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            code, output = self.run_cli(root, "weekly", "--mode", "short", "--allow-repeats", "--apply", "--message-self")
+            self.assertEqual(code, 1)
+            self.assertIn("No longer work will be substituted", output)
+            self.assertEqual({p: p.read_bytes() for p in root.rglob("*") if p.is_file()}, before)
+
+    def test_pending_delivery_cannot_bypass_new_short_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(work_type="book", reading_time="~200m")
+            (root / "library" / "index.md").write_text(render_index([entry]))
+            state = {"filename": entry.filename, "draft_path": "_output/weekly-read-drafts/pending.md", "requested_steps": ["notify_mac"], "completed_steps": []}
+            (root / "_state" / "weekly-delivery.json").write_text(json.dumps(state))
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            with patch("librarian.cli.run_delivery_steps") as delivery:
+                code, output = self.run_cli(root, "weekly-due", "--mode", "short", "--apply")
+            self.assertEqual(code, 2)
+            self.assertIn("excluded by the weekly filter", output)
+            delivery.assert_not_called()
+            self.assertEqual({p: p.read_bytes() for p in root.rglob("*") if p.is_file()}, before)
+
+    def test_short_weekly_apply_and_replacement_keep_books_unsent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config_path = root / "_state" / "config.toml"
+            config_path.write_text(config_path.read_text().replace('weekly_mode = "all"', 'weekly_mode = "short"'))
+            entries = [
+                self.ready_entry(author="A, Author", title="Book", filename="A_Book_2000_book.txt", work_type="book", reading_time="~15m"),
+                self.ready_entry(author="B, Author", title="Essay", filename="B_Essay_2000_essay.txt", work_type="essay", reading_time="~20m"),
+                self.ready_entry(author="C, Author", title="Story", filename="C_Story_2000_story.txt", work_type="story", reading_time="~30m"),
+            ]
+            index = root / "library" / "index.md"
+            index.write_text(render_index(entries))
+            code, output = self.run_cli(root, "weekly", "--apply")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Essay", output)
+            self.assertIn("digest-ready 2->2 (+0)", output)
+            code, output = self.run_cli(root, "reply", "new", "--apply")
+            self.assertEqual(code, 0)
+            self.assertIn("Replacement digest pick: Story", output)
+            saved = {entry.title: entry for entry in read_index(index)}
+            self.assertEqual(saved["Book"].sent, "never")
+            self.assertEqual(saved["Book"].status, "unread")
+            self.assertEqual(saved["Essay"].status, "skipped")
+            self.assertEqual(saved["Story"].sent, today())
+            self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 2)
+
+    def test_short_weekly_can_repeat_eligible_work_or_disable_time_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entries = [
+                self.ready_entry(author="A, Author", title="Long Excerpt", filename="A_Excerpt_2000_book.txt", work_type="book", reading_time="~110m"),
+                self.ready_entry(author="B, Author", title="Sent Story", filename="B_Story_2000_story.txt", work_type="story", reading_time="~20m", sent="2026-01-01"),
+            ]
+            (root / "library" / "index.md").write_text(render_index(entries))
+            code, _ = self.run_cli(root, "weekly", "--mode", "short")
+            self.assertEqual(code, 1)
+            code, output = self.run_cli(root, "weekly", "--mode", "short", "--allow-repeats")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Sent Story", output)
+            code, output = self.run_cli(root, "weekly", "--mode", "short", "--max-minutes", "0")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Long Excerpt", output)
+
+    def test_invalid_weekly_settings_fail_closed(self) -> None:
+        for setting in ('weekly_mode = "typo"', 'weekly_mode = []', 'weekly_max_minutes = -1', 'weekly_max_minutes = true', 'weekly_max_minutes = 1.5'):
+            with self.subTest(setting=setting), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_project(root)
+                path = root / "_state" / "config.toml"
+                key = setting.split(" = ")[0]
+                lines = [line for line in path.read_text().splitlines() if not line.startswith(key + " =")]
+                path.write_text("\n".join(lines) + "\n" + setting + "\n")
+                code, output = self.run_cli(root, "weekly", "--apply")
+                self.assertEqual(code, 2)
+                self.assertIn("CONFIG_ERROR", output)
+                self.assertEqual(list((root / "_output" / "weekly-read-drafts").iterdir()), [])
+
+    def test_excerpt_work_type_round_trips_in_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.md"
+            path.write_text(render_index([self.ready_entry(work_type="excerpt")]))
+            self.assertEqual(read_index(path)[0].work_type, "excerpt")
 
     def test_weekly_pick_apply_does_not_overwrite_existing_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -851,6 +1146,38 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertTrue(state["completed_at"])
             self.assertEqual(state["last_error"], "")
 
+    def test_weekly_delivery_does_not_repeat_interrupted_non_idempotent_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry()
+            (root / "library" / entry.filename).write_text("reading file", encoding="utf-8")
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+            draft = root / "_output" / "weekly-read-drafts" / "pending.md"
+            draft.write_text("pending digest", encoding="utf-8")
+            state = {
+                "schema_version": 1,
+                "week": "2026-W30",
+                "filename": entry.filename,
+                "draft_path": str(draft.relative_to(root)),
+                "requested_steps": ["message_self"],
+                "completed_steps": [],
+                "in_progress_step": "message_self",
+                "created_at": "2026-07-20T09:00:00",
+                "completed_at": "",
+                "last_error": "",
+            }
+            (root / "_state" / "weekly-delivery.json").write_text(json.dumps(state), encoding="utf-8")
+
+            with patch.dict(os.environ, {"LIBRARIAN_MESSAGE_TO": "me@example.com"}, clear=True), patch(
+                "librarian.cli.subprocess.run"
+            ) as run:
+                code, output = self.run_cli(root, "weekly-due", "--apply", "--message-self")
+
+            self.assertEqual(code, 2)
+            self.assertIn("outcome is unknown", output)
+            run.assert_not_called()
+
     def test_resend_latest_dry_run_prints_message_without_sending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1041,6 +1368,7 @@ class LibrarianCliTests(unittest.TestCase):
             payload = json.loads(request.data.decode("utf-8"))
             self.assertEqual(payload["from"], "Reading Librarian <reads@example.com>")
             self.assertEqual(payload["to"], ["me@example.com"])
+            self.assertTrue(request.headers["Idempotency-key"].startswith("reading-librarian/"))
 
     def test_digest_skips_unenriched_model_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1559,6 +1887,50 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].title, "The Design of Everyday Things")
             self.assertEqual(entries[0].year, "1988")
 
+    def test_repair_uses_original_filename_and_catalog_for_boilerplate_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_NoticeThisMaterialMayBeProtectedUntitledA5Untitled_1996_chapter.txt"
+            source.write_text(
+                "Notice: This material may be protected by Copyright Law (Title 17, U.S. Code)",
+                encoding="utf-8",
+            )
+            old = WorkEntry(
+                author="Temporalities, Three",
+                title="Notice This Material May Be Protected Untitled A5 Untitled",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+                original_filename="Three_Temporalities_Toward_an_Eventful_S.pdf",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+            payload = {
+                "docs": [
+                    {
+                        "title": "Three Temporalities: Toward an Eventful Sociology",
+                        "author_name": ["William H. Sewell"],
+                        "first_publish_year": 1996,
+                    }
+                ]
+            }
+
+            with patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = io.BytesIO(json.dumps(payload).encode("utf-8"))
+                code, output = self.run_cli(root, "repair", "Temporalities", "--lookup", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied metadata repair: 1 rename", output)
+            repaired = root / "library" / "SewellWilliamH_ThreeTemporalitiesTowardAnEventfulSociology_1996_chapter.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            entry = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(entry.author, "Sewell, William H.")
+            self.assertEqual(entry.title, "Three Temporalities: Toward an Eventful Sociology")
+            request = urlopen.call_args.args[0]
+            self.assertNotIn("author=", request.full_url)
+
     def test_repair_ocr_promotes_matching_scanned_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1622,6 +1994,142 @@ class LibrarianCliTests(unittest.TestCase):
             entries = {entry.title: entry for entry in read_index(root / "library" / "index.md")}
             self.assertEqual(entries["Selected"].next_action, "clean")
             self.assertEqual(entries["Other"].next_action, "needs_model")
+
+    def test_repair_model_can_correct_corrupted_identity_and_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_NoticeThisMaterialMayBeProtectedUntitledA5Untitled_1996_chapter.txt"
+            source.write_text(
+                "THREE TEMPORALITIES. This chapter compares teleological, experimental, and eventful concepts of historical time.",
+                encoding="utf-8",
+            )
+            old = WorkEntry(
+                author="Temporalities, Three",
+                title="Notice This Material May Be Protected Untitled A5 Untitled",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+                original_filename="Three_Temporalities_Toward_an_Eventful_S.pdf",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+            command = self.fake_model_script(
+                root,
+                "identity_model.py",
+                "import json, sys\n"
+                "json.load(sys.stdin)\n"
+                "print(json.dumps({\n"
+                "  'summary': 'This chapter distinguishes three approaches to historical time and argues for an eventful account centered on contingent transformations.',\n"
+                "  'primer_prompts': ['How does eventful temporality differ from teleology?', 'What role does contingency play in the argument?'],\n"
+                "  'tags': ['historical-sociology', 'temporality'],\n"
+                "  'related': 'Historical sociology.',\n"
+                "  'corrected_title': 'Three Temporalities: Toward an Eventful Sociology',\n"
+                "  'corrected_author': 'Sewell, William H.',\n"
+                "  'corrected_year': '1996',\n"
+                "  'corrected_work_type': 'chapter'\n"
+                "}))\n",
+            )
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "repair", "Temporalities", "--apply", "--enrich")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied enrichment for 1 entry", output)
+            repaired = root / "library" / "SewellWilliamH_ThreeTemporalitiesTowardAnEventfulSociology_1996_chapter.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            entry = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(entry.author, "Sewell, William H.")
+            self.assertEqual(entry.title, "Three Temporalities: Toward an Eventful Sociology")
+            self.assertEqual(entry.next_action, "clean")
+
+    def test_edit_previews_then_applies_identity_and_schema_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_BadTitle_1996_chapter.txt"
+            source.write_text("chapter text", encoding="utf-8")
+            entry = WorkEntry(
+                author="Temporalities, Three",
+                title="Bad Title",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+                original_filename="Three_Temporalities.pdf",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            args = (
+                "edit",
+                "BadTitle",
+                "--title",
+                "Three Temporalities: Toward an Eventful Sociology",
+                "--author",
+                "Sewell, William H. Jr.",
+                "--year",
+                "2005",
+                "--type",
+                "chapter",
+            )
+            code, output = self.run_cli(root, *args)
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] RENAME", output)
+            self.assertTrue(source.exists())
+
+            code, output = self.run_cli(root, *args, "--apply")
+
+            self.assertEqual(code, 0)
+            repaired = root / "library" / "SewellWilliamHJr_ThreeTemporalitiesTowardAnEventfulSociology_2005_chapter.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            corrected = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(corrected.author, "Sewell, William H. Jr.")
+            self.assertEqual(corrected.title, "Three Temporalities: Toward an Eventful Sociology")
+            self.assertEqual(corrected.year, "2005")
+
+            code, _ = self.run_cli(root, "reindex", "--apply")
+            self.assertEqual(code, 0)
+            preserved = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(preserved.author, "Sewell, William H. Jr.")
+            self.assertEqual(preserved.title, "Three Temporalities: Toward an Eventful Sociology")
+
+    def test_edit_refuses_to_overwrite_existing_schema_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_BadTitle_1996_chapter.txt"
+            target = root / "library" / "SewellWilliamHJr_ThreeTemporalitiesTowardAnEventfulSociology_2005_chapter.txt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("existing", encoding="utf-8")
+            entry = WorkEntry(
+                author="Temporalities, Three",
+                title="Bad Title",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(
+                root,
+                "edit",
+                "BadTitle",
+                "--title",
+                "Three Temporalities: Toward an Eventful Sociology",
+                "--author",
+                "Sewell, William H. Jr.",
+                "--year",
+                "2005",
+                "--apply",
+            )
+
+            self.assertEqual(code, 2)
+            self.assertIn("Corrected filename already exists", output)
+            self.assertEqual(source.read_text(encoding="utf-8"), "source")
+            self.assertEqual(target.read_text(encoding="utf-8"), "existing")
 
     def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

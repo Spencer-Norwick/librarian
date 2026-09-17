@@ -23,6 +23,14 @@ Project rules for this reading librarian:
 - Ignore symlinked inbox files unless there is a deliberate, reviewed reason to support them.
 - Keep `index.md` in the established heading and field format; update parser/lint tests when the format changes.
 
+Development delivery:
+
+- Completed owner-authorized development includes reviewed commits, pushing the task branch to the configured GitHub remote, and merging into the default branch after required checks pass. A local commit alone is not a completed delivery or cloud backup.
+- Use a pull request for the reviewed diff and validation record. Fetch current remote state before integration; preserve unrelated remote changes and branch protections.
+- Keep task branches backed up remotely at coherent checkpoints. Never force-push, rewrite shared history, or bypass failing checks to deliver faster.
+- Verify the merged commit on GitHub, fast-forward the local default branch, and report the public PR/commit link plus check results. If delivery is blocked, name the blocker and distinguish local, pushed, and merged work.
+- Requests for local-only work, drafts, or deferred merging override this default. Release tags, package publication, deployments, and reading-file delivery remain separate actions requiring their own authorization.
+
 Mount protocol for new users or forks:
 
 - Start with `librarian mount --check`.

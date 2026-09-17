@@ -140,6 +140,16 @@ def weak_title(value: str) -> bool:
     compact = normalized.replace(" ", "")
     if normalized in {"", "title", "untitled", "unknown"}:
         return True
+    if any(
+        marker in normalized
+        for marker in [
+            "copyright law",
+            "notice this material may be protected",
+            "title 17 u s code",
+            "untitled a5 untitled",
+        ]
+    ):
+        return True
     if re.fullmatch(r"\d+(?:pdf)?", compact):
         return True
     if re.fullmatch(r"[a-f0-9]{8,}(?:pdf)?", compact):
@@ -217,6 +227,10 @@ def front_matter_noise_line(line: str) -> bool:
             "all rights reserved",
             "printed in",
             "copyright",
+            "notice this material",
+            "may be protected",
+            "title 17",
+            "untitled",
             "©",
         ]
     )
@@ -245,7 +259,7 @@ def front_matter_title_before(lines: list[str], author_index: int) -> str:
         if not front_matter_title_line(line):
             break
         title_lines.insert(0, line)
-    return clean_title(" ".join(title_lines))
+    return clean_title(" ".join(title_lines)) if title_lines else ""
 
 
 def front_matter_title_line(line: str) -> bool:
@@ -259,6 +273,8 @@ def front_matter_title_line(line: str) -> bool:
 
 def should_use_text_title(guessed_title: str, guessed_author: str, text_title: str) -> bool:
     if not text_title:
+        return False
+    if weak_title(text_title):
         return False
     title_key = normalize_lookup_text(guessed_title)
     compact_key = title_key.replace(" ", "")
@@ -398,9 +414,19 @@ def infer_year_from_text(text: str) -> str:
 
 
 def should_lookup_catalog(title: str, author: str, year: str) -> bool:
-    if not title or title == "Untitled":
+    if not title or weak_title(title):
         return False
     return not year or author_needs_catalog_author(author, "")
+
+
+def catalog_title_is_better(title: str, catalog_title: str) -> bool:
+    local = normalize_lookup_text(title)
+    catalog = normalize_lookup_text(catalog_title)
+    if not catalog:
+        return False
+    if weak_title(title):
+        return True
+    return local != catalog and local in catalog and len(catalog) > len(local)
 
 
 def author_needs_catalog_author(author: str, catalog_author: str) -> bool:

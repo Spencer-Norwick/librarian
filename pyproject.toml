@@ -27,7 +27,7 @@ Issues = "https://github.com/Spencer-Norwick/librarian/issues"
 
 [project.optional-dependencies]
 pdf = ["pypdf>=4"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "build>=1"]
 
 [project.scripts]
 librarian = "librarian.cli:main"
@@ -35,3 +35,6 @@ reading-librarian = "librarian.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+librarian = ["templates/*.md", "templates/*.toml"]

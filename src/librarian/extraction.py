@@ -34,14 +34,41 @@ def extract_pdf(path: Path) -> tuple[dict[str, str], str, list[str]]:
             metadata["title"] = title
         if author:
             metadata["author"] = author
-        for page in getattr(reader, "pages", []):
+        pages = list(getattr(reader, "pages", []))
+        for page in pages:
             try:
                 text_parts.append(page.extract_text() or "")
             except Exception:
-                continue
+                text_parts.append("")
+        meaningful_pages = sum(page_has_meaningful_text(text) for text in text_parts)
+        minimum_text_pages = max(2, (len(pages) + 3) // 4)
+        if pages and meaningful_pages == 0:
+            review.append("PDF contains no meaningful extractable text; OCR is needed.")
+        elif len(pages) >= 3 and meaningful_pages < minimum_text_pages:
+            review.append(
+                f"Sparse PDF text coverage ({meaningful_pages}/{len(pages)} pages); OCR is needed."
+            )
     except Exception as exc:
         review.append(f"PDF extraction failed: {exc}")
     return metadata, "\n".join(text_parts), review
+
+
+def page_has_meaningful_text(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return False
+    normalized = re.sub(
+        r"(?i)\bnotice:?\s*this material may be protected\s+by copyright law\s*"
+        r"\(title 17,?\s*u\.?s\.?\s*code\)",
+        " ",
+        normalized,
+    )
+    words = re.findall(r"[A-Za-z0-9]+", normalized)
+    return len(words) >= 20 or len(normalized) >= 160
+
+
+def pdf_extraction_needs_ocr(text: str, review: list[str]) -> bool:
+    return not page_has_meaningful_text(text) or any("OCR is needed" in item for item in review)
 
 
 def extract_epub(path: Path) -> tuple[str, list[str]]:

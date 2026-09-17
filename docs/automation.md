@@ -20,10 +20,10 @@ Daily ingest:
 
 ```bash
 cd /path/to/reading-librarian
-.venv/bin/librarian daily --apply --lookup --enrich
+.venv/bin/librarian daily --apply
 ```
 
-Add `--lookup --enrich` only after the user has chosen catalog lookup and model enrichment for unattended new-file operation. Use `--maintain` only for a deliberate full-library repair pass.
+Plain daily ingestion does not create weekly summaries or prompts. Prepare the queue through reviewed enrichment before enabling weekly writes. Add `--lookup --enrich` only after the user has chosen catalog lookup and model enrichment for unattended new-file operation. Use `--maintain` only for a deliberate full-library repair pass.
 
 Weekly digest:
 
@@ -34,15 +34,30 @@ cd /path/to/reading-librarian
 
 This writes one weekly draft, marks the selected work sent, and appends `_state/sent-log.md`. It does not send email.
 
-Low-friction local delivery:
+Weekly selection can be limited without changing the scheduler or removing books:
+
+```bash
+.venv/bin/librarian mount --weekly-mode short --weekly-max-minutes 0
+.venv/bin/librarian mount --weekly-mode short --weekly-max-minutes 0 --apply
+```
+
+Short mode permits essays, articles, stories, papers, chapters, and explicitly labeled excerpts. The example uses `0` for the type filter alone. Set a positive number if you also want an estimated time ceiling; omitting this setting retains the configured ceiling (60 on a new workspace). Weekly commands, replacement picks, and the status queue use this preference; `--mode all` overrides it for one invocation. If no eligible work remains, delivery stops rather than choosing a book. The full library remains available.
+
+If an incomplete delivery's pick is excluded by a newly saved filter, its retry stops before sending anything further and preserves the delivery journal. Review that pending pick before explicitly widening the mode or ceiling to finish its delivery. `resend-latest` is an explicit resend of the previous selection, not a new filtered pick.
+
+macOS local delivery (requires a digest-ready queue and configured Messages recipient):
 
 ```bash
 cd /path/to/reading-librarian
-.venv/bin/librarian daily --apply --lookup --enrich
+.venv/bin/librarian daily --apply
 .venv/bin/librarian weekly-due --apply --notify-mac --open --message-self
 ```
 
+Notifications, file opening, Messages, Finder Quick Actions, and launchd are macOS integrations. Markdown-only weekly drafts do not require them.
+
 For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then calls the idempotent weekly delivery path. The weekly command writes a delivery journal at `_state/weekly-delivery.json`, posts a macOS notification, opens the local reading file, sends the title, summary, first prompt, and compact library status through Messages, then marks the pick sent only after requested delivery steps succeed. If a delivery step fails, a later launchd run retries the incomplete step without duplicating completed steps. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
+
+Email retries retain the original weekly idempotency key. The CLI permits an uncertain email retry for less than 23 hours from journal creation, conservatively inside Resend's 24-hour retention window. For older email attempts and for notification, file-open, and Messages steps, an interruption, timeout, connection failure, or failed AppleScript process may leave the outcome unknown. The journal preserves `in_progress_step` and stops automatic retries. Check the actual channel and the journal's `last_error` first: if delivery occurred, do not clear the marker to resend. If you confirm it did not occur and deliberately want a retry, back up the journal, clear only `in_progress_step` in `_state/weekly-delivery.json`, then rerun the matching command. If the outcome cannot be determined, leave the marker intact and seek help with redacted details.
 
 ## Preview Before Enabling
 

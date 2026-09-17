@@ -1,0 +1,5 @@
+# This is a reading workspace, not the librarian application's source checkout.
+# Install reading-librarian separately; run `librarian` from this directory.
+# Library settings live in the private `_state/config.toml`.
+[tool.librarian]
+workspace = true

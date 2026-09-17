@@ -67,8 +67,12 @@ def parse_entry_block(author: str, block: list[str]) -> WorkEntry:
             entry.tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
         elif line.startswith("Related:"):
             entry.related = line.removeprefix("Related:").strip()
+        elif line.startswith("Review notes:"):
+            entry.needs_review = parse_inline_list(line.removeprefix("Review notes:").strip(), separator=" | ")
         elif line.startswith("Next action:"):
             entry.next_action = line.removeprefix("Next action:").strip()
+        elif line.startswith("Added:"):
+            entry.added = line.removeprefix("Added:").strip()
     return entry
 
 
@@ -141,7 +145,9 @@ def render_entry(entry: WorkEntry) -> list[str]:
         f"  Primer prompts: {render_inline_list(entry.primer_prompts)}  ",
         f"  Tags: {one_line(', '.join(entry.tags))}  ",
         f"  Related: {one_line(entry.related)}  ",
-        f"  Next action: {one_line(entry.next_action)}",
+        f"  Review notes: {render_inline_list(entry.needs_review)}  ",
+        f"  Next action: {one_line(entry.next_action)}  ",
+        f"  Added: {one_line(entry.added)}",
     ]
 
 
