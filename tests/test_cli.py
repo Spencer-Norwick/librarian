@@ -23,7 +23,9 @@ from librarian.cli import (
     readme_markdown,
     render_index,
     today,
+    weekly_entry_eligible,
 )
+from librarian.config import project_config
 from librarian.metadata import useful_pdf_title
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -605,6 +607,171 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("Never Sent", output)
             self.assertNotIn("[dry-run] Weekly pick: Already Sent", output)
+
+    def test_short_weekly_eligibility_types_times_and_excerpts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config = project_config(root)
+            config.weekly_mode = "short"
+            for work_type in ("essay", "article", "story", "paper", "chapter", "excerpt"):
+                with self.subTest(work_type=work_type):
+                    self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type=work_type, reading_time="~60m")))
+                    self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type=work_type, reading_time="~61m")))
+            for time in ("~0m", "unknown", "", "~61m"):
+                self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type="essay", reading_time=time)))
+            self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type="book", reading_time="~10m", summary="This excerpt introduces a book about creative work and its many possible meanings.")))
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="book", title="Art (Excerpt)", reading_time="~30m")))
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="book", tags=["excerpt"], reading_time="~30m")))
+            config.weekly_max_minutes = 0
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="excerpt", reading_time="unknown")))
+            self.assertFalse(weekly_entry_eligible(config, self.ready_entry(work_type="book", reading_time="~10m")))
+            config.weekly_mode = "all"
+            self.assertTrue(weekly_entry_eligible(config, self.ready_entry(work_type="book", reading_time="~500m")))
+
+    def test_mount_weekly_preferences_preserve_other_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            path = root / "_state" / "config.toml"
+            original = path.read_text().replace("model_command = []", 'model_command = ["custom-hook"]')
+            original = original.replace("use_model_assistance = false", "use_model_assistance = true")
+            path.write_text(original)
+            code, output = self.run_cli(root, "mount", "--weekly-mode", "short", "--weekly-max-minutes", "30")
+            self.assertEqual(code, 0)
+            self.assertIn('weekly_mode = "short"', output)
+            self.assertEqual(path.read_text(), original)
+            code, _ = self.run_cli(root, "mount", "--weekly-mode", "short", "--weekly-max-minutes", "30", "--apply")
+            self.assertEqual(code, 0)
+            expected = tomllib.loads(original)
+            expected["behavior"].update(weekly_mode="short", weekly_max_minutes=30)
+            self.assertEqual(tomllib.loads(path.read_text()), expected)
+
+    def test_weekly_filter_applies_to_all_pickers_status_and_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config_path = root / "_state" / "config.toml"
+            config_path.write_text(config_path.read_text().replace('weekly_mode = "all"', 'weekly_mode = "short"'))
+            before_config = config_path.read_text()
+            entries = [
+                self.ready_entry(author="A, Author", title="Long Book", filename="A_LongBook_2000_book.txt", work_type="book", reading_time="~250m"),
+                self.ready_entry(author="B, Author", title="Short Essay", filename="B_ShortEssay_2000_essay.txt", work_type="essay", reading_time="~25m"),
+            ]
+            index = root / "library" / "index.md"
+            index.write_text(render_index(entries))
+            before_index = index.read_text()
+            for command in ("weekly", "weekly-due", "weekly-pick", "digest"):
+                with self.subTest(command=command):
+                    code, output = self.run_cli(root, command)
+                    self.assertEqual(code, 0)
+                    self.assertIn("Digest pick: Short Essay", output)
+                    code, output = self.run_cli(root, command, "--mode", "all")
+                    self.assertEqual(code, 0)
+                    self.assertIn("Digest pick: Long Book", output)
+                    code, output = self.run_cli(root, command, "--max-minutes", "20")
+                    self.assertEqual(code, 1)
+                    self.assertIn("No eligible short readings", output)
+            code, output = self.run_cli(root, "status")
+            self.assertEqual(code, 0)
+            self.assertIn("Next weekly pick: Short Essay", output)
+            self.assertIn("Digest-ready: 1; unsent ready: 1", output)
+            self.assertEqual(index.read_text(), before_index)
+            self.assertEqual(config_path.read_text(), before_config)
+            self.assertEqual(list((root / "_output" / "weekly-read-drafts").iterdir()), [])
+
+    def test_short_weekly_no_fallback_or_writes_even_with_repeats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            index = root / "library" / "index.md"
+            index.write_text(render_index([self.ready_entry(work_type="book", reading_time="~200m", sent="2026-01-01")]))
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            code, output = self.run_cli(root, "weekly", "--mode", "short", "--allow-repeats", "--apply", "--message-self")
+            self.assertEqual(code, 1)
+            self.assertIn("No longer work will be substituted", output)
+            self.assertEqual({p: p.read_bytes() for p in root.rglob("*") if p.is_file()}, before)
+
+    def test_pending_delivery_cannot_bypass_new_short_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entry = self.ready_entry(work_type="book", reading_time="~200m")
+            (root / "library" / "index.md").write_text(render_index([entry]))
+            state = {"filename": entry.filename, "draft_path": "_output/weekly-read-drafts/pending.md", "requested_steps": ["notify_mac"], "completed_steps": []}
+            (root / "_state" / "weekly-delivery.json").write_text(json.dumps(state))
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            with patch("librarian.cli.run_delivery_steps") as delivery:
+                code, output = self.run_cli(root, "weekly-due", "--mode", "short", "--apply")
+            self.assertEqual(code, 2)
+            self.assertIn("excluded by the weekly filter", output)
+            delivery.assert_not_called()
+            self.assertEqual({p: p.read_bytes() for p in root.rglob("*") if p.is_file()}, before)
+
+    def test_short_weekly_apply_and_replacement_keep_books_unsent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            config_path = root / "_state" / "config.toml"
+            config_path.write_text(config_path.read_text().replace('weekly_mode = "all"', 'weekly_mode = "short"'))
+            entries = [
+                self.ready_entry(author="A, Author", title="Book", filename="A_Book_2000_book.txt", work_type="book", reading_time="~15m"),
+                self.ready_entry(author="B, Author", title="Essay", filename="B_Essay_2000_essay.txt", work_type="essay", reading_time="~20m"),
+                self.ready_entry(author="C, Author", title="Story", filename="C_Story_2000_story.txt", work_type="story", reading_time="~30m"),
+            ]
+            index = root / "library" / "index.md"
+            index.write_text(render_index(entries))
+            code, output = self.run_cli(root, "weekly", "--apply")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Essay", output)
+            self.assertIn("digest-ready 2->2 (+0)", output)
+            code, output = self.run_cli(root, "reply", "new", "--apply")
+            self.assertEqual(code, 0)
+            self.assertIn("Replacement digest pick: Story", output)
+            saved = {entry.title: entry for entry in read_index(index)}
+            self.assertEqual(saved["Book"].sent, "never")
+            self.assertEqual(saved["Book"].status, "unread")
+            self.assertEqual(saved["Essay"].status, "skipped")
+            self.assertEqual(saved["Story"].sent, today())
+            self.assertEqual(len(list((root / "_output" / "weekly-read-drafts").glob("*.md"))), 2)
+
+    def test_short_weekly_can_repeat_eligible_work_or_disable_time_ceiling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            entries = [
+                self.ready_entry(author="A, Author", title="Long Excerpt", filename="A_Excerpt_2000_book.txt", work_type="book", reading_time="~110m"),
+                self.ready_entry(author="B, Author", title="Sent Story", filename="B_Story_2000_story.txt", work_type="story", reading_time="~20m", sent="2026-01-01"),
+            ]
+            (root / "library" / "index.md").write_text(render_index(entries))
+            code, _ = self.run_cli(root, "weekly", "--mode", "short")
+            self.assertEqual(code, 1)
+            code, output = self.run_cli(root, "weekly", "--mode", "short", "--allow-repeats")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Sent Story", output)
+            code, output = self.run_cli(root, "weekly", "--mode", "short", "--max-minutes", "0")
+            self.assertEqual(code, 0)
+            self.assertIn("Digest pick: Long Excerpt", output)
+
+    def test_invalid_weekly_settings_fail_closed(self) -> None:
+        for setting in ('weekly_mode = "typo"', 'weekly_mode = []', 'weekly_max_minutes = -1', 'weekly_max_minutes = true', 'weekly_max_minutes = 1.5'):
+            with self.subTest(setting=setting), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_project(root)
+                path = root / "_state" / "config.toml"
+                key = setting.split(" = ")[0]
+                lines = [line for line in path.read_text().splitlines() if not line.startswith(key + " =")]
+                path.write_text("\n".join(lines) + "\n" + setting + "\n")
+                code, output = self.run_cli(root, "weekly", "--apply")
+                self.assertEqual(code, 2)
+                self.assertIn("CONFIG_ERROR", output)
+                self.assertEqual(list((root / "_output" / "weekly-read-drafts").iterdir()), [])
+
+    def test_excerpt_work_type_round_trips_in_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.md"
+            path.write_text(render_index([self.ready_entry(work_type="excerpt")]))
+            self.assertEqual(read_index(path)[0].work_type, "excerpt")
 
     def test_weekly_pick_apply_does_not_overwrite_existing_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

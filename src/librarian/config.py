@@ -17,6 +17,12 @@ def project_config(root: Path) -> Config:
     paths = raw.get("paths", {})
     behavior = raw.get("behavior", {})
     supported = behavior.get("supported_extensions", sorted(SUPPORTED_EXTENSIONS))
+    weekly_mode = behavior.get("weekly_mode", "all")
+    weekly_max_minutes = behavior.get("weekly_max_minutes", 60)
+    if not isinstance(weekly_mode, str) or weekly_mode not in {"all", "short"}:
+        raise ValueError('weekly_mode must be "all" or "short".')
+    if type(weekly_max_minutes) is not int or weekly_max_minutes < 0:
+        raise ValueError("weekly_max_minutes must be a nonnegative integer (0 means no time ceiling).")
 
     def p(key: str, default: str) -> Path:
         return safe_project_path(root, paths.get(key, default))
@@ -37,6 +43,8 @@ def project_config(root: Path) -> Config:
         supported_extensions={ext.lower() for ext in supported},
         reading_words_per_minute=int(behavior.get("reading_words_per_minute", 250)),
         max_filename_stem_chars=int(behavior.get("max_filename_stem_chars", 96)),
+        weekly_mode=weekly_mode,
+        weekly_max_minutes=weekly_max_minutes,
         ocr_command=ocr_command(behavior.get("ocr_command", ["ocrmypdf", "--skip-text"])),
         use_catalog_lookup=bool(behavior.get("use_catalog_lookup", False)),
         catalog_timeout_seconds=float(behavior.get("catalog_timeout_seconds", 5.0)),
@@ -102,6 +110,8 @@ ocr_outputs = "_output/ocr"
 supported_extensions = [".pdf", ".epub", ".txt", ".md", ".docx"]
 reading_words_per_minute = 250
 max_filename_stem_chars = 96
+weekly_mode = "all"
+weekly_max_minutes = 60
 ocr_command = ["ocrmypdf", "--skip-text"]
 use_model_assistance = false
 model_command = []

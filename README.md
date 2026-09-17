@@ -87,6 +87,25 @@ Local weekly delivery example:
 librarian weekly-due --apply --notify-mac --open --message-self
 ```
 
+## Weekly Reading Size
+
+Keep the whole library, but limit weekly picks to shorter readings:
+
+```bash
+librarian mount --weekly-mode short --weekly-max-minutes 60
+librarian mount --weekly-mode short --weekly-max-minutes 60 --apply
+librarian weekly
+```
+
+The first command previews the config change; the second saves it. Existing model and delivery settings are preserved. Scheduled `weekly-due` jobs and `reply new` use the saved preference automatically.
+
+- `all` (the default) allows any digest-ready work.
+- `short` allows essays, articles, stories, papers, chapters, and excerpts. A book must be explicitly labeled `excerpt` in its title or tags to qualify.
+- Short mode also checks `weekly_max_minutes` (default 60). Unknown or zero reading times are excluded when a ceiling is active. Set it to `0` for short-form types with no time ceiling.
+- An empty filtered queue stops without substituting a longer work. Reading-time estimates depend on extracted text; the mode does not split books into excerpts.
+
+Preview a one-run override with `librarian weekly --mode all` or `librarian weekly --mode short --max-minutes 30`. Add `--apply` only when you want to write/send that digest. To return permanently to all works, preview `librarian mount --weekly-mode all`, then rerun with `--apply`.
+
 ## Metadata Pipeline
 
 The librarian uses the cheapest reliable step first:

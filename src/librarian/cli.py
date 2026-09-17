@@ -654,6 +654,10 @@ def detected_model_commands() -> dict[str, str]:
 def recommended_mount_model_command(root: Path, args: argparse.Namespace, detected: dict[str, str]) -> tuple[list[str], str]:
     if args.model_command:
         return shlex.split(args.model_command), "Using explicit --model-command."
+    if args.model is None and args.privacy != "local":
+        existing = project_config(root).model_command
+        if existing:
+            return existing, "Preserving the configured model command."
     if args.model == "none" or args.privacy == "local":
         return [], "Model enrichment disabled."
     if args.model == "custom":
@@ -694,8 +698,14 @@ def mounted_config(raw: dict, args: argparse.Namespace, recommended_model_comman
         "paths": {**defaults.get("paths", {}), **paths},
         "behavior": {**defaults.get("behavior", {}), **behavior},
     }
-    merged["behavior"]["model_command"] = recommended_model_command
-    merged["behavior"]["use_model_assistance"] = args.privacy == "automatic" and bool(recommended_model_command)
+    if args.model is not None or args.model_command or args.privacy == "local":
+        merged["behavior"]["model_command"] = recommended_model_command
+    if args.privacy is not None:
+        merged["behavior"]["use_model_assistance"] = args.privacy == "automatic" and bool(merged["behavior"]["model_command"])
+    for key in ("weekly_mode", "weekly_max_minutes"):
+        value = getattr(args, key, None)
+        if value is not None:
+            merged["behavior"][key] = value
     merged["behavior"]["use_catalog_lookup"] = bool(behavior.get("use_catalog_lookup", False))
     merged["behavior"]["require_external_model_approval"] = bool(behavior.get("require_external_model_approval", True))
     return merged
@@ -919,7 +929,7 @@ def render_run_summary(label: str, config: Config, before_entries: list[WorkEntr
     before_names = {entry.filename for entry in before_entries}
     after_names = {entry.filename for entry in after_entries}
     added = len(after_names - before_names)
-    before_ready = sum(entry_digest_ready(entry) for entry in before_entries)
+    before_ready = sum(entry_digest_ready(entry) and weekly_entry_eligible(config, entry) for entry in before_entries)
     after_status = build_library_status(config, after_entries)
     ready_delta = after_status.digest_ready - before_ready
     inbox_part = f"; inbox {before_inbox}->{after_status.inbox_count}" if before_inbox is not None else f"; inbox {after_status.inbox_count}"
@@ -1095,6 +1105,8 @@ def command_weekly(args: argparse.Namespace, root: Path) -> int:
             open=args.open,
             message_self=args.message_self,
             due_only=False,
+            mode=getattr(args, "mode", None),
+            max_minutes=getattr(args, "max_minutes", None),
         ),
         root,
     )
@@ -1111,6 +1123,8 @@ def command_weekly_due(args: argparse.Namespace, root: Path) -> int:
             open=args.open,
             message_self=args.message_self,
             due_only=True,
+            mode=getattr(args, "mode", None),
+            max_minutes=getattr(args, "max_minutes", None),
         ),
         root,
     )
@@ -1296,6 +1310,7 @@ def command_weekly_pick(args: argparse.Namespace, root: Path) -> int:
 
 def command_digest(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
+    apply_weekly_overrides(config, args)
     ensure_dirs(config)
     entries = read_index(config.index)
     before_entries = [replace_entry(entry) for entry in entries]
@@ -1308,7 +1323,7 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     if pending:
         plan = pending_digest_plan(config, entries, pending)
         if not plan:
-            raise ValueError("Pending weekly delivery references a missing or no-longer-ready library entry.")
+            raise ValueError("Pending weekly delivery is missing, no longer ready, or excluded by the weekly filter. Review the pending pick before explicitly changing the mode or time ceiling to resume it.")
         delivery_steps = list(pending.get("requested_steps", []))
         print(f"Retrying pending weekly delivery: {plan.entry.display_title} by {plan.entry.author}")
     else:
@@ -1316,6 +1331,9 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
         delivery_steps = requested_delivery_steps(args)
 
     if not plan:
+        if config.weekly_mode == "short":
+            print("No eligible short readings remain under the current weekly filter. No longer work will be substituted. Adjust --max-minutes or explicitly use --mode all to widen the selection.")
+            return 1
         print("No digest-ready unread works found. Run `librarian enrich --apply` or ingest new files with `librarian ingest --enrich --apply`.")
         guidance = digest_blocker_guidance(entries)
         if guidance:
@@ -1329,6 +1347,9 @@ def command_digest(args: argparse.Namespace, root: Path) -> int:
     if args.apply and "message_self" in delivery_steps:
         require_message_config(config)
     prefix = "[dry-run] " if not args.apply else ""
+    if config.weekly_mode == "short":
+        ceiling = f"up to {config.weekly_max_minutes} minutes" if config.weekly_max_minutes else "no time ceiling"
+        print(f"{prefix}Weekly mode: short ({ceiling}).")
     print(f"{prefix}Digest pick: {plan.entry.display_title} by {plan.entry.author}")
     print(f"{prefix}Draft path: {plan.draft_path.relative_to(root)}")
     if "notify_mac" in delivery_steps:
@@ -1402,6 +1423,7 @@ def replace_entry(entry: WorkEntry) -> WorkEntry:
 
 def command_reply(args: argparse.Namespace, root: Path) -> int:
     config = project_config(root)
+    apply_weekly_overrides(config, args)
     ensure_dirs(config)
     entries = read_index(config.index)
     current = latest_sent_entry(config, entries)
@@ -1663,15 +1685,35 @@ def extract_text_for_enrichment(path: Path) -> tuple[str, list[str]]:
     return "", [f"Text extraction not implemented for {path.suffix.lower()}."]
 
 
+def apply_weekly_overrides(config: Config, args: argparse.Namespace) -> None:
+    if getattr(args, "mode", None) is not None:
+        config.weekly_mode = args.mode
+    if getattr(args, "max_minutes", None) is not None:
+        config.weekly_max_minutes = args.max_minutes
+
+
+def weekly_entry_eligible(config: Config, entry: WorkEntry) -> bool:
+    """Filter weekly picks without changing the library or metadata readiness."""
+    if config.weekly_mode == "all":
+        return True
+    short_type = entry.work_type in {"essay", "article", "story", "paper", "chapter", "excerpt"}
+    explicit_excerpt = "excerpt" in entry.tags or bool(re.search(r"\bexcerpt\b", entry.title, re.I))
+    if not (short_type or explicit_excerpt):
+        return False
+    if config.weekly_max_minutes == 0:
+        return True
+    minutes = re.fullmatch(r"~?(\d+)m", entry.reading_time.strip())
+    return bool(minutes and 0 < int(minutes[1]) <= config.weekly_max_minutes)
+
+
 def build_digest_plan(config: Config, entries: list[WorkEntry], allow_repeats: bool = False) -> DigestPlan | None:
     candidates = [
         entry
         for entry in entries
         if entry_digest_ready(entry)
+        and weekly_entry_eligible(config, entry)
         and (allow_repeats or entry.sent == "never")
     ]
-    if not candidates and allow_repeats:
-        candidates = [entry for entry in entries if entry_digest_ready(entry)]
     if not candidates:
         return None
 
@@ -1689,7 +1731,7 @@ def pending_digest_plan(config: Config, entries: list[WorkEntry], state: dict[st
     draft_path = Path(str(state.get("draft_path") or ""))
     if not draft_path.is_absolute():
         draft_path = config.state.parent / draft_path
-    entry = next((item for item in entries if item.filename == filename and entry_digest_ready(item)), None)
+    entry = next((item for item in entries if item.filename == filename and entry_digest_ready(item) and weekly_entry_eligible(config, item)), None)
     if not entry:
         return None
     history = digest_history(config, entry)
@@ -1909,7 +1951,7 @@ Primer prompts:
 
 
 def build_library_status(config: Config, entries: list[WorkEntry], current_pick: WorkEntry | None = None) -> LibraryStatus:
-    ready = [entry for entry in entries if entry_digest_ready(entry)]
+    ready = [entry for entry in entries if entry_digest_ready(entry) and weekly_entry_eligible(config, entry)]
     unsent_ready = [entry for entry in ready if entry.sent == "never"]
     current_pick_pending = current_pick is not None and current_pick.sent == "never"
     remaining_unsent_ready = [
@@ -2241,6 +2283,21 @@ def match_entries(entries: list[WorkEntry], query: str) -> list[WorkEntry]:
     ]
 
 
+def nonnegative_minutes(value: str) -> int:
+    try:
+        minutes = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Use a nonnegative number of minutes; 0 disables the ceiling.") from None
+    if minutes < 0:
+        raise argparse.ArgumentTypeError("Minutes cannot be negative; 0 disables the ceiling.")
+    return minutes
+
+
+def add_weekly_filter_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--mode", choices=["all", "short"], help="Override the saved weekly selection mode for this run.")
+    parser.add_argument("--max-minutes", type=nonnegative_minutes, help="Reading-time ceiling in short mode; 0 allows any duration within short-form types.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="librarian")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2250,10 +2307,12 @@ def build_parser() -> argparse.ArgumentParser:
     mount = sub.add_parser("mount")
     mount.add_argument("--check", action="store_true", help="Inspect mount readiness without printing or writing config changes.")
     mount.add_argument("--apply", action="store_true")
-    mount.add_argument("--privacy", choices=["local", "assisted", "automatic"], default="assisted")
-    mount.add_argument("--model", choices=["auto", "none", "codex", "custom"], default="auto")
+    mount.add_argument("--privacy", choices=["local", "assisted", "automatic"], help="Privacy mode; preserve existing settings when omitted (new mounts default to assisted).")
+    mount.add_argument("--model", choices=["auto", "none", "codex", "custom"], help="Model setup; preserve existing settings when omitted.")
     mount.add_argument("--model-command", help="Explicit JSON enrichment command. Receives JSON on stdin and prints JSON on stdout.")
     mount.add_argument("--digest", choices=["none", "notify", "apply", "email"], default="notify")
+    mount.add_argument("--weekly-mode", choices=["all", "short"], help="Save a weekly selection mode without changing the library.")
+    mount.add_argument("--weekly-max-minutes", type=nonnegative_minutes, help="Save the short-mode time ceiling; 0 means no time ceiling.")
 
     ingest = sub.add_parser("ingest")
     ingest.add_argument("--apply", action="store_true")
@@ -2287,6 +2346,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich semantic metadata.")
 
     weekly = sub.add_parser("weekly")
+    add_weekly_filter_arguments(weekly)
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
     weekly.add_argument("--no-notify", action="store_true")
@@ -2296,6 +2356,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
     weekly_due = sub.add_parser("weekly-due")
+    add_weekly_filter_arguments(weekly_due)
     weekly_due.add_argument("--apply", action="store_true")
     weekly_due.add_argument("--no-notify", action="store_true")
     weekly_due.add_argument("--email", action="store_true")
@@ -2315,6 +2376,7 @@ def build_parser() -> argparse.ArgumentParser:
     ocr.add_argument("--enrich", action="store_true", help="Use configured model_command when rebuilding promoted OCR metadata.")
 
     weekly = sub.add_parser("weekly-pick")
+    add_weekly_filter_arguments(weekly)
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
     weekly.add_argument("--notify", action="store_true")
@@ -2324,6 +2386,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--message-self", action="store_true")
 
     digest = sub.add_parser("digest")
+    add_weekly_filter_arguments(digest)
     digest.add_argument("--apply", action="store_true")
     digest.add_argument("--allow-repeats", action="store_true")
     digest.add_argument("--notify", action="store_true")
@@ -2333,6 +2396,7 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
     reply = sub.add_parser("reply")
+    add_weekly_filter_arguments(reply)
     reply.add_argument("action", choices=["skip", "read", "new"])
     reply.add_argument("--apply", action="store_true")
     reply.add_argument("--allow-repeats", action="store_true")

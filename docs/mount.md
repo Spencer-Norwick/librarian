@@ -150,6 +150,8 @@ Do not work around this by moving `library/`, `_state/`, or `CODEX_HOME` outside
 
 ## Safety
 
+To change only weekly selection, preview `librarian mount --weekly-mode short --weekly-max-minutes 60`, then repeat with `--apply`. Omitted model and privacy flags preserve existing settings. Use `--weekly-mode all` to include books again, or `--weekly-max-minutes 0` to remove the short-mode time ceiling. No readings or sent state are changed by these config updates.
+
 `mount` writes only `_state/config.toml`, and only with `--apply`.
 
 Model enrichment can send title, author, filename, and text excerpts to the configured model provider. Keep `assisted` as the default unless the user deliberately chooses automatic enrichment.

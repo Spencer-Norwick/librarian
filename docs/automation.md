@@ -34,6 +34,17 @@ cd /path/to/reading-librarian
 
 This writes one weekly draft, marks the selected work sent, and appends `_state/sent-log.md`. It does not send email.
 
+Weekly selection can be limited without changing the scheduler or removing books:
+
+```bash
+.venv/bin/librarian mount --weekly-mode short --weekly-max-minutes 60
+.venv/bin/librarian mount --weekly-mode short --weekly-max-minutes 60 --apply
+```
+
+Short mode permits essays, articles, stories, papers, chapters, and explicitly labeled excerpts within the estimated time ceiling. `0` disables the ceiling while retaining the type filter. Weekly commands, replacement picks, and the status queue use this preference; `--mode all` overrides it for one invocation. If no eligible work remains, delivery stops rather than choosing a book. The full library remains available.
+
+If an incomplete delivery's pick is excluded by a newly saved filter, its retry stops before sending anything further and preserves the delivery journal. Review that pending pick before explicitly widening the mode or ceiling to finish its delivery. `resend-latest` is an explicit resend of the previous selection, not a new filtered pick.
+
 Low-friction local delivery:
 
 ```bash

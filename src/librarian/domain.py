@@ -15,6 +15,7 @@ WORK_TYPES = {
     "letters",
     "lecture",
     "notes",
+    "excerpt",
     "unknown",
 }
 SUPPORTED_EXTENSIONS = {".pdf", ".epub", ".txt", ".md", ".docx"}
@@ -49,6 +50,8 @@ class Config:
     supported_extensions: set[str] = field(default_factory=lambda: set(SUPPORTED_EXTENSIONS))
     reading_words_per_minute: int = 250
     max_filename_stem_chars: int = 96
+    weekly_mode: str = "all"
+    weekly_max_minutes: int = 60
     ocr_command: list[str] = field(default_factory=lambda: ["ocrmypdf", "--skip-text"])
     use_catalog_lookup: bool = False
     catalog_timeout_seconds: float = 5.0
