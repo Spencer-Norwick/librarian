@@ -7,7 +7,7 @@ Last known-good commit: cda6878 — Restore library consistency after repair fai
 
 ## Current Objective
 
-Public alpha development is complete on the review branch: consolidate safety/metadata and weekly/help work, fix installed setup, document first-run usage, and verify failure recovery using synthetic libraries. See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
+Deliver the reviewed public alpha work through a pushed, checked, merged GitHub pull request: consolidate safety/metadata and weekly/help work, fix installed setup, document first-run usage, and verify failure recovery using synthetic libraries. See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ## Verified State
 
@@ -42,15 +42,15 @@ Public alpha development is complete on the review branch: consolidate safety/me
 
 - Independent human first-run testing remains before announcing a release.
 - Python 3.11/Linux are configured in CI but not locally validated; Windows is unverified.
-- Public `main` remains unchanged. The review branch is not pushed/released; version stays 0.1.0 until a fresh alpha version/tag is chosen.
+- Routine development must be pushed and merged after checks pass; local commits alone are not delivery. Version remains 0.1.0 until a separate alpha release is chosen.
 
 ## Decisions and Constraints
 
 - Retain flat files, no database/wiki, dry-run defaults, explicit external-service consent, and no-overwrite operations.
 - Rollback covers caught failures, not crash-proof filesystem transactions or concurrent writers. Keep independent backups.
 - Keep real library files and ignored settings untouched. Do not run live delivery as validation.
-- Separate completed development from human testing and authorized publication. See [release.md](release.md).
+- Routine GitHub push/merge is authorized as part of development completion. Independent human usability testing, versioned release publication, and deployment are separate steps. See [release.md](release.md).
 
 ## Next Action
 
-1. Review `git diff main...codex/public-alpha-readiness` before following the release checklist.
+1. Push the review branch, merge its pull request after CI passes, and verify/synchronize GitHub and local `main`.
