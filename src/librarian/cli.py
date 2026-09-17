@@ -34,7 +34,7 @@ from .domain import (
     WorkEntry,
     clean_work_type,
 )
-from .extraction import extract_docx, extract_epub, extract_pdf
+from .extraction import extract_docx, extract_epub, extract_pdf, pdf_extraction_needs_ocr
 from .filesystem import (
     move_without_overwrite,
     supported_files,
@@ -56,6 +56,7 @@ from .index import (
 )
 from .metadata import (
     author_needs_catalog_author,
+    catalog_title_is_better,
     choose_author,
     clean_author,
     clean_title,
@@ -244,6 +245,8 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
     year = first_known_year(metadata.get("year", ""), guessed.get("year", ""), infer_year_from_text(text))
     if use_catalog_lookup and should_lookup_catalog(title, author, year):
         catalog = lookup_catalog_metadata(title, author, config)
+        if catalog.title and catalog_title_is_better(title, catalog.title):
+            title = clean_title(catalog.title)
         if catalog.author and author_needs_catalog_author(author, catalog.author):
             author = catalog.author
         if not year and catalog.year:
@@ -261,7 +264,7 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
         review.append("Author could not be fully inferred.")
     if title == "Untitled":
         review.append("Title could not be inferred.")
-    if path.suffix.lower() == ".pdf" and not text.strip():
+    if path.suffix.lower() == ".pdf" and pdf_extraction_needs_ocr(text, review):
         review.append("No extractable PDF text found; may need OCR.")
 
     word_count = len(re.findall(r"\b\w+\b", text))
@@ -277,7 +280,7 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
         review=review,
         summary=summary,
     )
-    if use_model_enrichment and next_action == "needs_model":
+    if use_model_enrichment and next_action in {"needs_catalog", "needs_manual", "needs_model"}:
         attempt = try_enrich_from_model(
             config=config,
             entry=WorkEntry(author=author, title=title, year=year, work_type=work_type, original_filename=path.name),
@@ -285,6 +288,12 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
         )
         enrichment = attempt.enrichment
         if enrichment:
+            identity = WorkEntry(author=author, title=title, year=year, work_type=work_type)
+            identity_changed = apply_model_identity(identity, enrichment)
+            author = identity.author
+            title = identity.title
+            year = identity.year
+            work_type = identity.work_type
             summary = enrichment.summary
             primer_prompts = enrichment.primer_prompts
             if enrichment.tags:
@@ -293,7 +302,17 @@ def infer_entry(path: Path, config: Config, use_catalog_lookup: bool = False, us
                 related = enrichment.related
             else:
                 related = "None."
-            next_action = "clean"
+            if identity_changed and author != "Unknown" and "," in author and title != "Untitled" and year != "nd":
+                review = [
+                    item
+                    for item in review
+                    if not item.startswith(("Author could not", "Title could not", "Catalog lookup failed"))
+                ]
+            next_action = (
+                "clean"
+                if not review
+                else classify_next_action(author, title, year, text, review, summary)
+            )
         else:
             review.append(f"Model enrichment failed: {attempt.reason}.")
             related = "None."
@@ -392,14 +411,14 @@ def render_pdf_title_page(path: Path, output_dir: Path) -> Path | None:
 
 
 def lookup_catalog_metadata(title: str, author: str, config: Config) -> CatalogMatch:
-    query = urllib.parse.urlencode(
-        {
-            "title": title,
-            "author": "" if author == "Unknown" else author.replace(",", ""),
-            "fields": "title,author_name,first_publish_year",
-            "limit": "5",
-        }
-    )
+    params = {
+        "title": title,
+        "fields": "title,author_name,first_publish_year",
+        "limit": "5",
+    }
+    if author not in {"", "Unknown"}:
+        params["author"] = author.replace(",", "")
+    query = urllib.parse.urlencode(params)
     request = urllib.request.Request(
         f"https://openlibrary.org/search.json?{query}",
         headers={"User-Agent": "reading-librarian/0.1 (+local CLI)"},
@@ -449,6 +468,8 @@ def classify_next_action(author: str, title: str, year: str, text: str, review: 
     no_text = not text.strip()
     if weak_metadata:
         return "needs_catalog"
+    if any("OCR is needed" in item for item in review):
+        return "needs_ocr"
     if no_text:
         return "needs_ocr"
     if any("Catalog lookup failed" in item or "failed" in item.lower() for item in review):
@@ -500,6 +521,9 @@ def try_enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelE
             "Write a concise, specific summary of the work in 1-3 sentences.",
             "Write 3 work-specific primer_prompts that help a reader enter the work.",
             "Use short lowercase tags when useful.",
+            "When identity metadata is visibly corrupted or incomplete and the filename or excerpt supports a correction, return corrected identity fields.",
+            "Format corrected_author as 'Surname, Given names' for the library index.",
+            "Leave corrected identity fields empty when the evidence does not support a correction.",
             "Do not invent bibliographic facts not supported by the metadata or text excerpt.",
         ],
         "work": {
@@ -516,6 +540,10 @@ def try_enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelE
             "primer_prompts": ["string", "string", "string"],
             "tags": ["string"],
             "related": "string",
+            "corrected_title": "string",
+            "corrected_author": "string",
+            "corrected_year": "string",
+            "corrected_work_type": "string",
         },
     }
     try:
@@ -549,6 +577,10 @@ def try_enrich_from_model(config: Config, entry: WorkEntry, text: str) -> ModelE
         primer_prompts=[one_line(str(item)) for item in raw.get("primer_prompts", []) if one_line(str(item))],
         tags=[normalize_tag(str(item)) for item in raw.get("tags", []) if normalize_tag(str(item))],
         related=one_line(str(raw.get("related", ""))),
+        corrected_title=one_line(str(raw.get("corrected_title", ""))),
+        corrected_author=one_line(str(raw.get("corrected_author", ""))),
+        corrected_year=clean_year(str(raw.get("corrected_year", ""))) if raw.get("corrected_year") else "",
+        corrected_work_type=clean_work_type(str(raw.get("corrected_work_type", ""))) if raw.get("corrected_work_type") else "",
     )
     reason = enrichment_validation_reason(entry, enrichment)
     if reason:
@@ -570,6 +602,41 @@ def enrichment_validation_reason(entry: WorkEntry, enrichment: ModelEnrichment) 
     if len(enrichment.primer_prompts) < 2:
         return "fewer than two primer prompts were returned"
     return ""
+
+
+def apply_model_identity(entry: WorkEntry, enrichment: ModelEnrichment) -> bool:
+    changed = False
+    original_title_was_weak = weak_title(entry.title)
+    original_identity_was_incomplete = (
+        original_title_was_weak or entry.author == "Unknown" or "," not in entry.author
+    )
+    corrected_title = clean_title(enrichment.corrected_title) if enrichment.corrected_title else ""
+    if corrected_title and (
+        original_title_was_weak or catalog_title_is_better(entry.title, corrected_title)
+    ):
+        entry.title = corrected_title
+        changed = True
+
+    corrected_author = clean_author(enrichment.corrected_author) if enrichment.corrected_author else ""
+    if corrected_author and corrected_author != "Unknown" and (
+        entry.author == "Unknown" or "," not in entry.author or original_title_was_weak
+    ):
+        entry.author = corrected_author
+        changed = True
+
+    if (
+        (entry.year == "nd" or original_identity_was_incomplete)
+        and re.fullmatch(r"(1[5-9]\d{2}|20\d{2})", enrichment.corrected_year)
+        and enrichment.corrected_year != entry.year
+    ):
+        entry.year = enrichment.corrected_year
+        changed = True
+
+    corrected_work_type = clean_work_type(enrichment.corrected_work_type)
+    if entry.work_type == "unknown" and corrected_work_type != "unknown":
+        entry.work_type = corrected_work_type
+        changed = True
+    return changed
 
 
 def normalize_tag(value: str) -> str:
@@ -684,9 +751,14 @@ def detected_model_commands() -> dict[str, str]:
         path = shutil.which(name)
         if path:
             detected[name] = path
-    bundled_codex = Path("/Applications/Codex.app/Contents/Resources/codex")
-    if "codex" not in detected and bundled_codex.exists():
-        detected["codex"] = str(bundled_codex)
+    bundled_codex_paths = [
+        Path("/Applications/Codex.app/Contents/Resources/codex"),
+        Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+    ]
+    if "codex" not in detected:
+        bundled_codex = next((path for path in bundled_codex_paths if path.exists()), None)
+        if bundled_codex:
+            detected["codex"] = str(bundled_codex)
     return detected
 
 
@@ -900,7 +972,7 @@ def build_inbox_preparation_plan(config: Config, use_catalog_lookup: bool = Fals
         if source.suffix.lower() != ".pdf":
             continue
         _metadata, text, review = extract_pdf(source)
-        if text.strip():
+        if not pdf_extraction_needs_ocr(text, review):
             continue
         if any("PDF extraction failed" in item for item in review):
             continue
@@ -1000,10 +1072,15 @@ def command_repair(args: argparse.Namespace, root: Path) -> int:
 
     if args.ocr:
         for entry in selected:
-            if entry.next_action == "needs_ocr":
+            if Path(entry.filename).suffix.lower() == ".pdf":
                 print(f"{action_prefix} OCR/promote: {entry.filename}")
 
-    metadata_plan = build_targeted_metadata_repair_plan(config, selected_names, use_catalog_lookup=args.lookup)
+    metadata_plan = build_targeted_metadata_repair_plan(
+        config,
+        selected_names,
+        use_catalog_lookup=args.lookup,
+        use_model_enrichment=args.enrich,
+    )
     rename_sources = {rename.source_name for rename in metadata_plan.renames}
     rename_targets = {rename.target_name for rename in metadata_plan.renames}
     preview_names = (selected_names - rename_sources) | rename_targets
@@ -1014,9 +1091,22 @@ def command_repair(args: argparse.Namespace, root: Path) -> int:
             print(f"{action_prefix} REVIEW {entry.next_action}: {entry.filename} — {entry.author} — {entry.display_title}: {'; '.join(review_reasons(entry))}")
 
     if args.enrich:
-        for entry in selected:
-            if entry.next_action == "needs_model" or not entry.primer_prompts or not usable_digest_summary(entry):
-                print(f"{action_prefix} ENRICH: {entry.filename}")
+        planned_entries = {
+            entry.filename: entry
+            for entry in metadata_plan.entries
+            if entry.filename in preview_names
+        }
+        for filename in sorted(preview_names):
+            planned = planned_entries.get(filename)
+            if planned and planned.next_action == "clean" and planned.primer_prompts:
+                print(f"{action_prefix} PROPOSED ENRICH: {planned.filename}")
+                print(f"  Identity: {planned.author} — {planned.display_title} ({planned.year}) — {planned.work_type}")
+                print(f"  Summary: {planned.summary}")
+                print(f"  Primer prompts: {' | '.join(planned.primer_prompts)}")
+                print(f"  Tags: {', '.join(planned.tags)}")
+                print(f"  Related: {planned.related}")
+            else:
+                print(f"{action_prefix} ENRICH: {filename}")
 
     if not args.apply:
         print("Dry run only. Re-run with --apply to repair matching entries.")
@@ -1024,7 +1114,7 @@ def command_repair(args: argparse.Namespace, root: Path) -> int:
 
     if args.ocr:
         for entry in list(selected):
-            if entry.next_action == "needs_ocr":
+            if Path(entry.filename).suffix.lower() == ".pdf":
                 code = command_ocr(
                     argparse.Namespace(query=entry.filename, apply=True, promote=True, lookup=args.lookup, enrich=False),
                     root,
@@ -1035,8 +1125,14 @@ def command_repair(args: argparse.Namespace, root: Path) -> int:
         selected = [entry for entry in entries if entry.filename in selected_names or (args.query and match_entries([entry], args.query))]
         selected_names = {entry.filename for entry in selected}
 
-    if args.lookup:
-        metadata_plan = build_targeted_metadata_repair_plan(config, selected_names, use_catalog_lookup=True)
+    if args.lookup or args.enrich:
+        if args.ocr:
+            metadata_plan = build_targeted_metadata_repair_plan(
+                config,
+                selected_names,
+                use_catalog_lookup=args.lookup,
+                use_model_enrichment=args.enrich,
+            )
         rename_sources = {rename.source_name for rename in metadata_plan.renames}
         rename_targets = {rename.target_name for rename in metadata_plan.renames}
         for rename in metadata_plan.renames:
@@ -1046,21 +1142,9 @@ def command_repair(args: argparse.Namespace, root: Path) -> int:
         entries = read_index(config.index)
         selected_names = (selected_names - rename_sources) | rename_targets
         selected = [entry for entry in entries if entry.filename in selected_names]
-
-    if args.enrich:
-        changed = apply_targeted_enrichment(config, selected)
-        if changed:
-            entries = read_index(config.index)
-            by_filename = {entry.filename: entry for entry in entries}
-            for enriched in changed:
-                if enriched.filename in by_filename:
-                    by_filename[enriched.filename].summary = enriched.summary
-                    by_filename[enriched.filename].primer_prompts = enriched.primer_prompts
-                    by_filename[enriched.filename].tags = enriched.tags
-                    by_filename[enriched.filename].related = enriched.related
-                    by_filename[enriched.filename].next_action = enriched.next_action
-            write_index(config.index, entries)
-        print(f"Applied enrichment for {len(changed)} entr{'y' if len(changed) == 1 else 'ies'}.")
+        if args.enrich:
+            changed = sum(entry.next_action == "clean" for entry in selected)
+            print(f"Applied enrichment for {changed} entr{'y' if changed == 1 else 'ies'}.")
 
     print("Repair complete.")
     return command_lint(argparse.Namespace(apply=False), root)
@@ -1070,7 +1154,12 @@ def repair_candidates(entries: list[WorkEntry]) -> list[WorkEntry]:
     return [entry for entry in entries if entry.status not in {"read", "skipped"} and not entry_digest_ready(entry)]
 
 
-def build_targeted_metadata_repair_plan(config: Config, filenames: set[str], use_catalog_lookup: bool = False) -> MaintenancePlan:
+def build_targeted_metadata_repair_plan(
+    config: Config,
+    filenames: set[str],
+    use_catalog_lookup: bool = False,
+    use_model_enrichment: bool = False,
+) -> MaintenancePlan:
     existing_entries = {entry.filename: entry for entry in read_index(config.index)}
     library_files = library_reading_files(config)
     reserved = {path.name for path in library_files}
@@ -1083,9 +1172,30 @@ def build_targeted_metadata_repair_plan(config: Config, filenames: set[str], use
             if old:
                 rebuilt.append(old)
             continue
-        entry = infer_entry(path, config, use_catalog_lookup=use_catalog_lookup, use_model_enrichment=False)
+        entry = infer_entry(
+            path,
+            config,
+            use_catalog_lookup=use_catalog_lookup,
+            use_model_enrichment=use_model_enrichment,
+        )
         if old:
+            inferred_title_before_hint = entry.title
             apply_original_filename_title_hint(entry, old)
+            if (
+                use_catalog_lookup
+                and entry.title != inferred_title_before_hint
+                and not weak_title(entry.title)
+            ):
+                catalog = lookup_catalog_metadata(entry.title, "Unknown", config)
+                if catalog.title and catalog_title_is_better(entry.title, catalog.title):
+                    entry.title = clean_title(catalog.title)
+                if catalog.author:
+                    entry.author = catalog.author
+                if entry.year == "nd" and catalog.year:
+                    entry.year = catalog.year
+                if catalog.note:
+                    entry.needs_review.append(catalog.note)
+            preserve_existing_identity_when_stronger(entry, old)
             preserve_existing_state(entry, old)
             if old.next_action == "clean" and entry_needs_review(entry):
                 preserve_existing_semantics(entry, old)
@@ -1223,9 +1333,43 @@ def should_repair_filename(current_name: str, entry: WorkEntry, desired_name: st
 def apply_original_filename_title_hint(entry: WorkEntry, old: WorkEntry) -> None:
     if not old.original_filename or not weak_title(entry.title):
         return
-    title = title_hint_from_original_filename(old.original_filename, entry.author)
+    author_words = {word.lower().strip(".") for word in re.findall(r"[A-Za-z]+", entry.author)}
+    number_words = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+    author_hint = "" if author_words & number_words else entry.author
+    title = title_hint_from_original_filename(old.original_filename, author_hint)
     if title and not weak_title(title):
         entry.title = title
+
+
+def preserve_existing_identity_when_stronger(entry: WorkEntry, old: WorkEntry) -> None:
+    if (
+        (entry.author == "Unknown" or "," not in entry.author)
+        and "," in old.author
+        and not weak_title(old.title)
+    ):
+        entry.author = old.author
+        entry.needs_review = [
+            item for item in entry.needs_review if not item.startswith("Author could not")
+        ]
+    if weak_title(entry.title) and not weak_title(old.title):
+        entry.title = old.title
+        entry.needs_review = [
+            item for item in entry.needs_review if not item.startswith("Title could not")
+        ]
+    if entry.year == "nd" and old.year != "nd":
+        entry.year = old.year
+    if entry.work_type == "unknown" and old.work_type != "unknown":
+        entry.work_type = old.work_type
+    if (
+        entry.author != "Unknown"
+        and "," in entry.author
+        and not weak_title(entry.title)
+        and entry.year != "nd"
+        and entry.primer_prompts
+        and usable_digest_summary(entry)
+        and not entry.needs_review
+    ):
+        entry.next_action = "clean"
 
 
 def title_hint_from_original_filename(original_filename: str, author: str) -> str:
@@ -1240,6 +1384,10 @@ def title_hint_from_original_filename(original_filename: str, author: str) -> st
 
 
 def preserve_existing_state(entry: WorkEntry, old: WorkEntry) -> None:
+    if normalize_lookup_text(entry.title) == normalize_lookup_text(old.title):
+        entry.title = old.title
+    if normalize_lookup_text(entry.author) == normalize_lookup_text(old.author):
+        entry.author = old.author
     entry.original_filename = old.original_filename or entry.original_filename
     entry.status = old.status
     entry.sent = old.sent
@@ -2288,6 +2436,80 @@ def command_search(args: argparse.Namespace, root: Path) -> int:
     return 0 if found else 1
 
 
+def command_edit(args: argparse.Namespace, root: Path) -> int:
+    config = project_config(root)
+    entries = read_index(config.index)
+    matches = match_entries(entries, args.query)
+    if not matches:
+        print(f"No entry matched {args.query!r}.")
+        return 1
+    if len(matches) > 1:
+        print(f"Multiple entries matched {args.query!r}; use a more specific title or filename.")
+        for match in matches:
+            print(f"- {match.display_title} `{match.filename}`")
+        return 1
+    if not any([args.title, args.author, args.year, args.work_type]):
+        raise ValueError("edit requires at least one of --title, --author, --year, or --type.")
+
+    entry = matches[0]
+    changes: list[tuple[str, str, str]] = []
+    requested = {
+        "title": clean_title(args.title) if args.title else entry.title,
+        "author": clean_author(args.author) if args.author else entry.author,
+        "year": clean_year(args.year) if args.year else entry.year,
+        "work_type": clean_work_type(args.work_type) if args.work_type else entry.work_type,
+    }
+    if args.year and requested["year"] == "nd" and args.year != "nd":
+        raise ValueError("--year must be a four-digit year or nd.")
+    if args.work_type and requested["work_type"] == "unknown" and args.work_type != "unknown":
+        raise ValueError(f"Unsupported work type: {args.work_type}.")
+
+    for field, value in requested.items():
+        old_value = getattr(entry, field)
+        if value != old_value:
+            changes.append((field, old_value, value))
+            setattr(entry, field, value)
+
+    source = config.library / entry.filename
+    target_name = make_filename(entry, config, source.suffix.lower())
+    target = config.library / target_name
+    if target != source and target.exists():
+        raise ValueError(f"Corrected filename already exists: {target_name}")
+
+    prefix = "[dry-run] " if not args.apply else ""
+    for field, old_value, new_value in changes:
+        print(f"{prefix}{field}: {old_value} -> {new_value}")
+    if target != source:
+        print(f"{prefix}RENAME: {source.name} -> {target.name}")
+    if not changes and target == source:
+        print("No correction needed.")
+        return 0
+    if not args.apply:
+        print("Dry run only. Re-run with --apply to update the file and index.md.")
+        return 0
+
+    moved = False
+    try:
+        if target != source:
+            move_without_overwrite(source, target)
+            moved = True
+            entry.filename = target.name
+        if entry.next_action in {"needs_catalog", "needs_manual"}:
+            entry.next_action = "needs_model"
+        entry.needs_review = [
+            note
+            for note in entry.needs_review
+            if not note.startswith(("Author could not", "Title could not", "Catalog lookup failed"))
+        ]
+        write_index(config.index, entries)
+    except Exception:
+        if moved and target.exists() and not source.exists():
+            move_without_overwrite(target, source)
+        raise
+    print(f"Updated {entry.display_title}.")
+    return 0
+
+
 def command_mark(args: argparse.Namespace, root: Path, status: str) -> int:
     config = project_config(root)
     entries = read_index(config.index)
@@ -2329,12 +2551,27 @@ def match_entries(entries: list[WorkEntry], query: str) -> list[WorkEntry]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="librarian")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="librarian",
+        description="Manage a local, flat-file reading library.",
+        epilog=(
+            "Run 'librarian COMMAND --help' for command-specific options. "
+            "File-changing commands preview by default; use --apply to write."
+        ),
+    )
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="COMMAND",
+    )
 
-    sub.add_parser("init")
+    def command_parser(name: str, summary: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=summary, description=summary)
 
-    mount = sub.add_parser("mount")
+    command_parser("init", "Initialize a librarian workspace.")
+
+    mount = command_parser("mount", "Inspect or configure this librarian workspace.")
     mount.add_argument("--check", action="store_true", help="Inspect mount readiness without printing or writing config changes.")
     mount.add_argument("--apply", action="store_true")
     mount.add_argument("--privacy", choices=["local", "assisted", "automatic"], default="assisted")
@@ -2342,38 +2579,38 @@ def build_parser() -> argparse.ArgumentParser:
     mount.add_argument("--model-command", help="Explicit JSON enrichment command. Receives JSON on stdin and prints JSON on stdout.")
     mount.add_argument("--digest", choices=["none", "notify", "apply", "email"], default="notify")
 
-    ingest = sub.add_parser("ingest")
+    ingest = command_parser("ingest", "Move inbox files into the library and index them.")
     ingest.add_argument("--apply", action="store_true")
     ingest.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     ingest.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
-    lint = sub.add_parser("lint")
+    lint = command_parser("lint", "Check the library and index for problems.")
     lint.add_argument("--apply", action="store_true")
 
-    reindex = sub.add_parser("reindex")
+    reindex = command_parser("reindex", "Rebuild metadata in the library index.")
     reindex.add_argument("--apply", action="store_true")
     reindex.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     reindex.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
-    maintain = sub.add_parser("maintain")
+    maintain = command_parser("maintain", "Repair filenames and refresh library metadata.")
     maintain.add_argument("--apply", action="store_true")
     maintain.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     maintain.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
-    daily = sub.add_parser("daily")
+    daily = command_parser("daily", "Run inbox preparation, ingest, and checks.")
     daily.add_argument("--apply", action="store_true")
     daily.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     daily.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
     daily.add_argument("--maintain", action="store_true", help="Also run the full library maintenance pass.")
 
-    repair = sub.add_parser("repair")
+    repair = command_parser("repair", "Repair selected works or current review blockers.")
     repair.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to current review blockers.")
     repair.add_argument("--apply", action="store_true")
     repair.add_argument("--ocr", action="store_true", help="OCR and promote entries marked needs_ocr.")
     repair.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     repair.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich semantic metadata.")
 
-    weekly = sub.add_parser("weekly")
+    weekly = command_parser("weekly", "Preview or create the next weekly reading.")
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
     weekly.add_argument("--no-notify", action="store_true")
@@ -2382,7 +2619,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
     weekly.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
-    weekly_due = sub.add_parser("weekly-due")
+    weekly_due = command_parser("weekly-due", "Deliver the weekly reading once when due.")
     weekly_due.add_argument("--apply", action="store_true")
     weekly_due.add_argument("--no-notify", action="store_true")
     weekly_due.add_argument("--email", action="store_true")
@@ -2390,18 +2627,18 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_due.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
     weekly_due.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
-    enrich = sub.add_parser("enrich")
+    enrich = command_parser("enrich", "Improve summaries, prompts, and tags with a model.")
     enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
     enrich.add_argument("--apply", action="store_true")
 
-    ocr = sub.add_parser("ocr")
+    ocr = command_parser("ocr", "Create searchable copies of scanned PDFs.")
     ocr.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_ocr entries.")
     ocr.add_argument("--apply", action="store_true")
     ocr.add_argument("--promote", action="store_true", help="Preserve the original library PDF and replace it with the OCR-searchable copy.")
     ocr.add_argument("--lookup", action="store_true", help="Use catalog lookup when rebuilding promoted OCR metadata.")
     ocr.add_argument("--enrich", action="store_true", help="Use configured model_command when rebuilding promoted OCR metadata.")
 
-    weekly = sub.add_parser("weekly-pick")
+    weekly = command_parser("weekly-pick", "Select a reading using the legacy weekly command.")
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
     weekly.add_argument("--notify", action="store_true")
@@ -2410,7 +2647,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--open", action="store_true")
     weekly.add_argument("--message-self", action="store_true")
 
-    digest = sub.add_parser("digest")
+    digest = command_parser("digest", "Select and deliver a reading digest.")
     digest.add_argument("--apply", action="store_true")
     digest.add_argument("--allow-repeats", action="store_true")
     digest.add_argument("--notify", action="store_true")
@@ -2419,27 +2656,35 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the digest draft.")
     digest.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
-    reply = sub.add_parser("reply")
+    reply = command_parser("reply", "Respond to the latest weekly reading.")
     reply.add_argument("action", choices=["skip", "read", "new"])
     reply.add_argument("--apply", action="store_true")
     reply.add_argument("--allow-repeats", action="store_true")
     reply.add_argument("--no-notify", action="store_true")
     reply.add_argument("--email", action="store_true")
 
-    resend = sub.add_parser("resend-latest")
+    resend = command_parser("resend-latest", "Resend the latest reading through Messages.")
     resend.add_argument("--apply", action="store_true")
 
-    sub.add_parser("list")
-    sub.add_parser("status")
+    command_parser("list", "List every work in the library.")
+    command_parser("status", "Show library totals and upcoming readings.")
 
-    search = sub.add_parser("search")
+    search = command_parser("search", "Search the library index.")
     search.add_argument("query")
 
-    mark = sub.add_parser("mark-read")
+    edit = command_parser("edit", "Correct a work's identity metadata and filename.")
+    edit.add_argument("query")
+    edit.add_argument("--title")
+    edit.add_argument("--author")
+    edit.add_argument("--year")
+    edit.add_argument("--type", dest="work_type", choices=sorted(WORK_TYPES))
+    edit.add_argument("--apply", action="store_true")
+
+    mark = command_parser("mark-read", "Mark a matching work as read.")
     mark.add_argument("query")
     mark.add_argument("--apply", action="store_true")
 
-    skip = sub.add_parser("skip")
+    skip = command_parser("skip", "Mark a matching work as skipped.")
     skip.add_argument("query")
     skip.add_argument("--apply", action="store_true")
     return parser
@@ -2488,6 +2733,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
             return command_status(args, root)
         if args.command == "search":
             return command_search(args, root)
+        if args.command == "edit":
+            return command_edit(args, root)
         if args.command == "mark-read":
             return command_mark(args, root, "read")
         if args.command == "skip":

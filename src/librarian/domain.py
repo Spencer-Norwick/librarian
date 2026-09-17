@@ -146,6 +146,10 @@ class ModelEnrichment:
     primer_prompts: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     related: str = ""
+    corrected_title: str = ""
+    corrected_author: str = ""
+    corrected_year: str = ""
+    corrected_work_type: str = ""
 
 
 @dataclass

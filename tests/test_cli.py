@@ -15,6 +15,7 @@ from unittest.mock import patch
 from librarian.cli import (
     WorkEntry,
     agents_markdown,
+    build_parser,
     clean_title,
     filename_convention_ok,
     infer_year_from_text,
@@ -24,7 +25,8 @@ from librarian.cli import (
     render_index,
     today,
 )
-from librarian.metadata import useful_pdf_title
+from librarian.extraction import page_has_meaningful_text, pdf_extraction_needs_ocr
+from librarian.metadata import infer_identity_from_front_matter, useful_pdf_title
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -127,6 +129,40 @@ class LibrarianCliTests(unittest.TestCase):
 
         self.assertEqual(scripts["librarian"], "librarian.cli:main")
         self.assertEqual(scripts["reading-librarian"], "librarian.cli:main")
+
+    def test_pdf_copyright_notice_is_not_meaningful_text(self) -> None:
+        notice = "Notice: This material may be protected by Copyright Law (Title 17, U.S. Code)"
+
+        self.assertFalse(page_has_meaningful_text(notice))
+        self.assertTrue(
+            pdf_extraction_needs_ocr(
+                notice,
+                ["Sparse PDF text coverage (0/22 pages); OCR is needed."],
+            )
+        )
+
+    def test_copyright_banner_is_not_front_matter_identity(self) -> None:
+        text = "\n".join(
+            [
+                "Notice: This material may be protected",
+                "by Copyright Law (Title 17, U.S. Code)",
+                "THREE TEMPORALITIES",
+                "83",
+            ]
+        )
+
+        self.assertEqual(infer_identity_from_front_matter(text), {})
+
+    def test_top_level_help_lists_commands_vertically(self) -> None:
+        output = build_parser().format_help()
+
+        self.assertIn("usage: librarian [-h] COMMAND ...", output)
+        self.assertIn("commands:\n  COMMAND", output)
+        self.assertIn("    ingest", output)
+        self.assertIn("Move inbox files into the library and index them.", output)
+        self.assertIn("    status", output)
+        self.assertIn("Show library totals and upcoming readings.", output)
+        self.assertNotIn("{init,mount,ingest", output)
 
     def test_mount_check_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -408,6 +444,22 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertIn("[dry-run] OCR inbox PDF", output)
             self.assertTrue(source.exists())
             self.assertEqual(list((root / "_output" / "ocr").glob("*.pdf")), [])
+
+    def test_daily_treats_sparse_boilerplate_pdf_text_as_needing_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "inbox" / "SewellWilliamH_ThreeTemporalitiesTowardAnEventfulSociology_1996_chapter.pdf"
+            source.write_bytes(b"scanned pdf placeholder")
+            notice = "Notice: This material may be protected by Copyright Law (Title 17, U.S. Code)"
+            review = ["Sparse PDF text coverage (0/22 pages); OCR is needed."]
+
+            with patch("librarian.cli.extract_pdf", return_value=({}, notice, review)):
+                code, output = self.run_cli(root, "daily")
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] OCR inbox PDF", output)
+            self.assertTrue(source.exists())
 
     def test_daily_apply_ocr_prepares_scanned_pdf_before_ingest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1644,6 +1696,50 @@ class LibrarianCliTests(unittest.TestCase):
             self.assertEqual(entries[0].title, "The Design of Everyday Things")
             self.assertEqual(entries[0].year, "1988")
 
+    def test_repair_uses_original_filename_and_catalog_for_boilerplate_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_NoticeThisMaterialMayBeProtectedUntitledA5Untitled_1996_chapter.txt"
+            source.write_text(
+                "Notice: This material may be protected by Copyright Law (Title 17, U.S. Code)",
+                encoding="utf-8",
+            )
+            old = WorkEntry(
+                author="Temporalities, Three",
+                title="Notice This Material May Be Protected Untitled A5 Untitled",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+                original_filename="Three_Temporalities_Toward_an_Eventful_S.pdf",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+            payload = {
+                "docs": [
+                    {
+                        "title": "Three Temporalities: Toward an Eventful Sociology",
+                        "author_name": ["William H. Sewell"],
+                        "first_publish_year": 1996,
+                    }
+                ]
+            }
+
+            with patch("urllib.request.urlopen") as urlopen:
+                urlopen.return_value = io.BytesIO(json.dumps(payload).encode("utf-8"))
+                code, output = self.run_cli(root, "repair", "Temporalities", "--lookup", "--apply")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied metadata repair: 1 rename", output)
+            repaired = root / "library" / "SewellWilliamH_ThreeTemporalitiesTowardAnEventfulSociology_1996_chapter.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            entry = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(entry.author, "Sewell, William H.")
+            self.assertEqual(entry.title, "Three Temporalities: Toward an Eventful Sociology")
+            request = urlopen.call_args.args[0]
+            self.assertNotIn("author=", request.full_url)
+
     def test_repair_ocr_promotes_matching_scanned_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1707,6 +1803,142 @@ class LibrarianCliTests(unittest.TestCase):
             entries = {entry.title: entry for entry in read_index(root / "library" / "index.md")}
             self.assertEqual(entries["Selected"].next_action, "clean")
             self.assertEqual(entries["Other"].next_action, "needs_model")
+
+    def test_repair_model_can_correct_corrupted_identity_and_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_NoticeThisMaterialMayBeProtectedUntitledA5Untitled_1996_chapter.txt"
+            source.write_text(
+                "THREE TEMPORALITIES. This chapter compares teleological, experimental, and eventful concepts of historical time.",
+                encoding="utf-8",
+            )
+            old = WorkEntry(
+                author="Temporalities, Three",
+                title="Notice This Material May Be Protected Untitled A5 Untitled",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+                original_filename="Three_Temporalities_Toward_an_Eventful_S.pdf",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([old]), encoding="utf-8")
+            command = self.fake_model_script(
+                root,
+                "identity_model.py",
+                "import json, sys\n"
+                "json.load(sys.stdin)\n"
+                "print(json.dumps({\n"
+                "  'summary': 'This chapter distinguishes three approaches to historical time and argues for an eventful account centered on contingent transformations.',\n"
+                "  'primer_prompts': ['How does eventful temporality differ from teleology?', 'What role does contingency play in the argument?'],\n"
+                "  'tags': ['historical-sociology', 'temporality'],\n"
+                "  'related': 'Historical sociology.',\n"
+                "  'corrected_title': 'Three Temporalities: Toward an Eventful Sociology',\n"
+                "  'corrected_author': 'Sewell, William H.',\n"
+                "  'corrected_year': '1996',\n"
+                "  'corrected_work_type': 'chapter'\n"
+                "}))\n",
+            )
+
+            with patch.dict(os.environ, {"LIBRARIAN_MODEL_COMMAND": command}, clear=True):
+                code, output = self.run_cli(root, "repair", "Temporalities", "--apply", "--enrich")
+
+            self.assertEqual(code, 0)
+            self.assertIn("Applied enrichment for 1 entry", output)
+            repaired = root / "library" / "SewellWilliamH_ThreeTemporalitiesTowardAnEventfulSociology_1996_chapter.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            entry = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(entry.author, "Sewell, William H.")
+            self.assertEqual(entry.title, "Three Temporalities: Toward an Eventful Sociology")
+            self.assertEqual(entry.next_action, "clean")
+
+    def test_edit_previews_then_applies_identity_and_schema_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_BadTitle_1996_chapter.txt"
+            source.write_text("chapter text", encoding="utf-8")
+            entry = WorkEntry(
+                author="Temporalities, Three",
+                title="Bad Title",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+                original_filename="Three_Temporalities.pdf",
+                next_action="needs_model",
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            args = (
+                "edit",
+                "BadTitle",
+                "--title",
+                "Three Temporalities: Toward an Eventful Sociology",
+                "--author",
+                "Sewell, William H. Jr.",
+                "--year",
+                "2005",
+                "--type",
+                "chapter",
+            )
+            code, output = self.run_cli(root, *args)
+
+            self.assertEqual(code, 0)
+            self.assertIn("[dry-run] RENAME", output)
+            self.assertTrue(source.exists())
+
+            code, output = self.run_cli(root, *args, "--apply")
+
+            self.assertEqual(code, 0)
+            repaired = root / "library" / "SewellWilliamHJr_ThreeTemporalitiesTowardAnEventfulSociology_2005_chapter.txt"
+            self.assertTrue(repaired.exists())
+            self.assertFalse(source.exists())
+            corrected = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(corrected.author, "Sewell, William H. Jr.")
+            self.assertEqual(corrected.title, "Three Temporalities: Toward an Eventful Sociology")
+            self.assertEqual(corrected.year, "2005")
+
+            code, _ = self.run_cli(root, "reindex", "--apply")
+            self.assertEqual(code, 0)
+            preserved = read_index(root / "library" / "index.md")[0]
+            self.assertEqual(preserved.author, "Sewell, William H. Jr.")
+            self.assertEqual(preserved.title, "Three Temporalities: Toward an Eventful Sociology")
+
+    def test_edit_refuses_to_overwrite_existing_schema_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_project(root)
+            source = root / "library" / "TemporalitiesThree_BadTitle_1996_chapter.txt"
+            target = root / "library" / "SewellWilliamHJr_ThreeTemporalitiesTowardAnEventfulSociology_2005_chapter.txt"
+            source.write_text("source", encoding="utf-8")
+            target.write_text("existing", encoding="utf-8")
+            entry = WorkEntry(
+                author="Temporalities, Three",
+                title="Bad Title",
+                year="1996",
+                work_type="chapter",
+                filename=source.name,
+            )
+            (root / "library" / "index.md").write_text(render_index([entry]), encoding="utf-8")
+
+            code, output = self.run_cli(
+                root,
+                "edit",
+                "BadTitle",
+                "--title",
+                "Three Temporalities: Toward an Eventful Sociology",
+                "--author",
+                "Sewell, William H. Jr.",
+                "--year",
+                "2005",
+                "--apply",
+            )
+
+            self.assertEqual(code, 2)
+            self.assertIn("Corrected filename already exists", output)
+            self.assertEqual(source.read_text(encoding="utf-8"), "source")
+            self.assertEqual(target.read_text(encoding="utf-8"), "existing")
 
     def test_maintain_dry_run_proposes_stale_filename_repair_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
