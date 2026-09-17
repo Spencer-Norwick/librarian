@@ -2,45 +2,55 @@
 
 Last updated: 2026-09-17
 Repository: reading-librarian
-Branch: codex/readable-cli-help
-Last known-good baseline: a6e3114 — Add configurable short-reading mode for weekly picks (94 tests passed before this change).
+Branch: codex/public-alpha-readiness
+Last known-good commit: cda6878 — Restore library consistency after repair failures and preserve uncertain delivery state.
 
 ## Current Objective
 
-Make `librarian --help` display every command in an aligned vertical list with concise explanations and guidance for command-specific help.
+Public alpha development is complete on the review branch: consolidate safety/metadata and weekly/help work, fix installed setup, document first-run usage, and verify failure recovery using synthetic libraries. See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ## Verified State
 
-- Top-level help lists all 21 commands with aligned descriptions, compact usage, and dry-run guidance; it works without creating a workspace.
-- `weekly_mode = "all"` preserves the default selection behavior; `short` filters by work type or an explicit excerpt label and an estimated time ceiling.
-- Weekly aliases, scheduled picks, replacement picks, retries, and queue status respect the filter. Empty queues never fall back to books.
-- `weekly_max_minutes = 0` removes the time ceiling while retaining the short-form filter. Otherwise unknown and zero reading times are excluded.
-- Mount settings are previewed before applying; omitted model/privacy options preserve saved settings.
+- Both previous branches are integrated; help describes all 22 commands, including `edit`.
+- Installed `init` uses bundled guidance and preserves existing setup files without a source checkout.
+- Weekly short mode filters types and optionally duration; `0` disables the ceiling. Empty queues and excluded pending picks never fall back to books.
+- Ingest, maintenance/repair, and OCR promotion recover from caught failures using no-overwrite moves; incomplete rollback reports preserved-file locations.
+- Index writes preserve added dates, review notes, original filenames, and reading state. Automatic enrichment respects default approval requirements.
+- Ambiguous delivery failures remain pending for review. Email retries reuse their original identity across week boundaries.
+- Real reading files, local hooks/config, and delivery recipients remain untracked; development used temporary synthetic libraries only.
 
 ## Recent Progress
 
-- Added descriptions to every registered command and a regression check for complete, aligned help within 80 columns.
-- Added saved preferences and per-run selection overrides, including an `excerpt` work type.
-- Added regression coverage for delivery retries, empty queues, no-write previews, overrides, repeated picks, replacement picks, validation, and config preservation.
+- Closed maintenance, source-removal, absent-state ingest, and OCR promotion recovery gaps with regressions.
+- Added onboarding, verified synthetic walkthrough, contribution/security guidance, unreleased notes, and a release checklist.
+- Built/inspected sdist and wheel; exercised installed commands after removing the build checkout.
+- Restored Linux/macOS CI with Python 3.11/3.14 and installed-package checks.
 
 ## Validation
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| `.venv/bin/python -m pytest -q` | passed | 95 tests and 15 subtests, 2026-09-17 |
-| `git diff --check` | passed | No whitespace errors |
-| Local mount and weekly preview | passed | Saved short mode; index, sent log, and delivery journal unchanged |
+| `python -m pytest -q` | passed | 124 tests and 19 subtests; macOS/Python 3.14, 2026-09-17 |
+| Same suite from `git archive HEAD` | passed | 124 tests and 19 subtests without ignored files or local state |
+| `python scripts/check-installed-package.py` | passed | sdist/wheel allowlists; fresh install; both aliases, setup, previews, ingest, local short weekly, lint |
+| `docs/examples.md` workflow | passed | Synthetic ingest → local test-hook enrichment → maintain → short draft; no external delivery |
+| `detect-secrets scan --all-files --no-verify` on exported historical text blobs | passed | 203 historical text blobs; no findings. Automated scanning is not a guarantee |
+| Compilation and `git diff --check` | passed | No compilation or whitespace errors |
+| Remote CI and live provider/OCR/delivery integrations | not run | CI awaits publication; integrations synthetic/mocked during development |
 
 ## Active Problems
 
-- No blockers for the selection mode. Eligibility depends on indexed types and text-derived time estimates; it does not extract excerpts from full books.
+- Independent human first-run testing remains before announcing a release.
+- Python 3.11/Linux are configured in CI but not locally validated; Windows is unverified.
+- Public `main` remains unchanged. The review branch is not pushed/released; version stays 0.1.0 until a fresh alpha version/tag is chosen.
 
 ## Decisions and Constraints
 
-- Default to all works for existing installations; enable short mode explicitly.
-- Stop an excluded pending delivery without changing its journal. Widen the filter explicitly only after reviewing that pending pick.
-- Keep library files, index format, and delivery schedules intact. See `README.md` and `docs/automation.md` for operation.
+- Retain flat files, no database/wiki, dry-run defaults, explicit external-service consent, and no-overwrite operations.
+- Rollback covers caught failures, not crash-proof filesystem transactions or concurrent writers. Keep independent backups.
+- Keep real library files and ignored settings untouched. Do not run live delivery as validation.
+- Separate completed development from human testing and authorized publication. See [release.md](release.md).
 
 ## Next Action
 
-1. Run `.venv/bin/librarian --help` for the command overview, then `.venv/bin/librarian COMMAND --help` for options.
+1. Review `git diff main...codex/public-alpha-readiness` before following the release checklist.
