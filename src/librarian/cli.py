@@ -2299,12 +2299,16 @@ def add_weekly_filter_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="librarian")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="librarian",
+        description="Manage a local reading library and weekly reading picks.",
+        epilog="Run librarian COMMAND --help for command options. Commands with --apply preview changes by default. Run library commands from your librarian project directory.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True, title="commands", metavar="COMMAND")
 
-    sub.add_parser("init")
+    sub.add_parser("init", help="Create a librarian workspace and default files.")
 
-    mount = sub.add_parser("mount")
+    mount = sub.add_parser("mount", help="Check setup and configure local preferences.")
     mount.add_argument("--check", action="store_true", help="Inspect mount readiness without printing or writing config changes.")
     mount.add_argument("--apply", action="store_true")
     mount.add_argument("--privacy", choices=["local", "assisted", "automatic"], help="Privacy mode; preserve existing settings when omitted (new mounts default to assisted).")
@@ -2314,38 +2318,38 @@ def build_parser() -> argparse.ArgumentParser:
     mount.add_argument("--weekly-mode", choices=["all", "short"], help="Save a weekly selection mode without changing the library.")
     mount.add_argument("--weekly-max-minutes", type=nonnegative_minutes, help="Save the short-mode time ceiling; 0 means no time ceiling.")
 
-    ingest = sub.add_parser("ingest")
+    ingest = sub.add_parser("ingest", help="Move inbox files into the library and index them.")
     ingest.add_argument("--apply", action="store_true")
     ingest.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     ingest.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
-    lint = sub.add_parser("lint")
+    lint = sub.add_parser("lint", help="Check filenames, index entries, and missing files.")
     lint.add_argument("--apply", action="store_true")
 
-    reindex = sub.add_parser("reindex")
+    reindex = sub.add_parser("reindex", help="Rebuild the index from library files.")
     reindex.add_argument("--apply", action="store_true")
     reindex.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     reindex.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
-    maintain = sub.add_parser("maintain")
+    maintain = sub.add_parser("maintain", help="Repair filenames and rebuild the index.")
     maintain.add_argument("--apply", action="store_true")
     maintain.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     maintain.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
 
-    daily = sub.add_parser("daily")
+    daily = sub.add_parser("daily", help="Run inbox OCR preparation, ingest, and lint.")
     daily.add_argument("--apply", action="store_true")
     daily.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     daily.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich summary, tags, and primer prompts.")
     daily.add_argument("--maintain", action="store_true", help="Also run the full library maintenance pass.")
 
-    repair = sub.add_parser("repair")
+    repair = sub.add_parser("repair", help="Repair entries with catalog lookup, OCR, or enrichment.")
     repair.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to current review blockers.")
     repair.add_argument("--apply", action="store_true")
     repair.add_argument("--ocr", action="store_true", help="OCR and promote entries marked needs_ocr.")
     repair.add_argument("--lookup", action="store_true", help="Use optional Open Library catalog lookup for weak metadata.")
     repair.add_argument("--enrich", action="store_true", help="Use configured model_command to enrich semantic metadata.")
 
-    weekly = sub.add_parser("weekly")
+    weekly = sub.add_parser("weekly", help="Preview or deliver this week's reading.")
     add_weekly_filter_arguments(weekly)
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
@@ -2355,7 +2359,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
     weekly.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
-    weekly_due = sub.add_parser("weekly-due")
+    weekly_due = sub.add_parser("weekly-due", help="Deliver once per week; retry incomplete delivery.")
     add_weekly_filter_arguments(weekly_due)
     weekly_due.add_argument("--apply", action="store_true")
     weekly_due.add_argument("--no-notify", action="store_true")
@@ -2364,18 +2368,18 @@ def build_parser() -> argparse.ArgumentParser:
     weekly_due.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the weekly draft.")
     weekly_due.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
-    enrich = sub.add_parser("enrich")
+    enrich = sub.add_parser("enrich", help="Improve summaries, tags, and prompts with a model.")
     enrich.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_model entries.")
     enrich.add_argument("--apply", action="store_true")
 
-    ocr = sub.add_parser("ocr")
+    ocr = sub.add_parser("ocr", help="Create searchable copies of scanned PDFs.")
     ocr.add_argument("query", nargs="?", help="Optional title, author, or filename query. Defaults to all needs_ocr entries.")
     ocr.add_argument("--apply", action="store_true")
     ocr.add_argument("--promote", action="store_true", help="Preserve the original library PDF and replace it with the OCR-searchable copy.")
     ocr.add_argument("--lookup", action="store_true", help="Use catalog lookup when rebuilding promoted OCR metadata.")
     ocr.add_argument("--enrich", action="store_true", help="Use configured model_command when rebuilding promoted OCR metadata.")
 
-    weekly = sub.add_parser("weekly-pick")
+    weekly = sub.add_parser("weekly-pick", help="Choose a weekly reading (alias for digest).")
     add_weekly_filter_arguments(weekly)
     weekly.add_argument("--apply", action="store_true")
     weekly.add_argument("--allow-repeats", action="store_true")
@@ -2385,7 +2389,7 @@ def build_parser() -> argparse.ArgumentParser:
     weekly.add_argument("--open", action="store_true")
     weekly.add_argument("--message-self", action="store_true")
 
-    digest = sub.add_parser("digest")
+    digest = sub.add_parser("digest", help="Prepare a reading digest with optional delivery.")
     add_weekly_filter_arguments(digest)
     digest.add_argument("--apply", action="store_true")
     digest.add_argument("--allow-repeats", action="store_true")
@@ -2395,7 +2399,7 @@ def build_parser() -> argparse.ArgumentParser:
     digest.add_argument("--open", action="store_true", help="Open the selected local reading file after writing the digest draft.")
     digest.add_argument("--message-self", action="store_true", help="Send title, summary, and first prompt to the configured Messages recipient.")
 
-    reply = sub.add_parser("reply")
+    reply = sub.add_parser("reply", help="Mark the latest pick read, skip it, or request another.")
     add_weekly_filter_arguments(reply)
     reply.add_argument("action", choices=["skip", "read", "new"])
     reply.add_argument("--apply", action="store_true")
@@ -2403,20 +2407,20 @@ def build_parser() -> argparse.ArgumentParser:
     reply.add_argument("--no-notify", action="store_true")
     reply.add_argument("--email", action="store_true")
 
-    resend = sub.add_parser("resend-latest")
+    resend = sub.add_parser("resend-latest", help="Resend the latest reading through Messages.")
     resend.add_argument("--apply", action="store_true")
 
-    sub.add_parser("list")
-    sub.add_parser("status")
+    sub.add_parser("list", help="List indexed works and their reading status.")
+    sub.add_parser("status", help="Show library totals, review needs, and the next pick.")
 
-    search = sub.add_parser("search")
+    search = sub.add_parser("search", help="Find works by title, author, or filename.")
     search.add_argument("query")
 
-    mark = sub.add_parser("mark-read")
+    mark = sub.add_parser("mark-read", help="Mark matching works as read.")
     mark.add_argument("query")
     mark.add_argument("--apply", action="store_true")
 
-    skip = sub.add_parser("skip")
+    skip = sub.add_parser("skip", help="Mark matching works as skipped.")
     skip.add_argument("query")
     skip.add_argument("--apply", action="store_true")
     return parser

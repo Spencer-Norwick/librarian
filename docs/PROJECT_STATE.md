@@ -2,15 +2,16 @@
 
 Last updated: 2026-09-17
 Repository: reading-librarian
-Branch: codex/weekly-short-reads
-Last known-good baseline: 415a4d7 — Make weekly delivery idempotent (85 tests passed before this change).
+Branch: codex/readable-cli-help
+Last known-good baseline: a6e3114 — Add configurable short-reading mode for weekly picks (94 tests passed before this change).
 
 ## Current Objective
 
-Let users keep a mixed library while selecting only short readings for weekly delivery. Save the preference through the dry-run-first mount workflow and preserve existing model and delivery settings.
+Make `librarian --help` display every command in an aligned vertical list with concise explanations and guidance for command-specific help.
 
 ## Verified State
 
+- Top-level help lists all 21 commands with aligned descriptions, compact usage, and dry-run guidance; it works without creating a workspace.
 - `weekly_mode = "all"` preserves the default selection behavior; `short` filters by work type or an explicit excerpt label and an estimated time ceiling.
 - Weekly aliases, scheduled picks, replacement picks, retries, and queue status respect the filter. Empty queues never fall back to books.
 - `weekly_max_minutes = 0` removes the time ceiling while retaining the short-form filter. Otherwise unknown and zero reading times are excluded.
@@ -18,6 +19,7 @@ Let users keep a mixed library while selecting only short readings for weekly de
 
 ## Recent Progress
 
+- Added descriptions to every registered command and a regression check for complete, aligned help within 80 columns.
 - Added saved preferences and per-run selection overrides, including an `excerpt` work type.
 - Added regression coverage for delivery retries, empty queues, no-write previews, overrides, repeated picks, replacement picks, validation, and config preservation.
 
@@ -25,7 +27,7 @@ Let users keep a mixed library while selecting only short readings for weekly de
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| `.venv/bin/python -m pytest -q` | passed | 94 tests and 15 subtests, 2026-09-17 |
+| `.venv/bin/python -m pytest -q` | passed | 95 tests and 15 subtests, 2026-09-17 |
 | `git diff --check` | passed | No whitespace errors |
 | Local mount and weekly preview | passed | Saved short mode; index, sent log, and delivery journal unchanged |
 
@@ -41,4 +43,4 @@ Let users keep a mixed library while selecting only short readings for weekly de
 
 ## Next Action
 
-1. Preview future selections with `.venv/bin/librarian weekly`; use `--mode` and `--max-minutes` for temporary overrides.
+1. Run `.venv/bin/librarian --help` for the command overview, then `.venv/bin/librarian COMMAND --help` for options.

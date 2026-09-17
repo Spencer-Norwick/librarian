@@ -57,6 +57,8 @@ Test/sample files live under `tests/fixtures/`. Real reading files should live d
 
 ## Core Commands
 
+Run `librarian --help` for an aligned list of every command and a short explanation. Use `librarian COMMAND --help` (for example, `librarian ingest --help`) for that command's options.
+
 Commands that modify files or Markdown are dry-run by default. Use `--apply` to write.
 
 ```bash

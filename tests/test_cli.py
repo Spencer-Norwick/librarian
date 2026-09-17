@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -15,6 +17,7 @@ from unittest.mock import patch
 from librarian.cli import (
     WorkEntry,
     agents_markdown,
+    build_parser,
     clean_title,
     filename_convention_ok,
     infer_year_from_text,
@@ -32,6 +35,26 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class LibrarianCliTests(unittest.TestCase):
+    def test_top_level_help_lists_every_command_with_aligned_explanations(self) -> None:
+        parser = build_parser()
+        commands = next(action.choices for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"COLUMNS": "80"}):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                main(["--help"], root=Path(tmp))
+            self.assertEqual(stopped.exception.code, 0)
+            help_text = output.getvalue()
+            self.assertIn("usage: librarian [-h] COMMAND ...", help_text)
+            self.assertIn("commands:", help_text)
+            self.assertIn("librarian COMMAND --help", help_text)
+            self.assertIn("--apply", help_text)
+            rows = re.findall(r"^    (\S+)( {2,})(\S[^\n]+)$", help_text, re.M)
+            self.assertEqual([name for name, _, _ in rows], list(commands))
+            self.assertEqual(len({len(name) + len(space) for name, space, _ in rows}), 1)
+            self.assertTrue(all(len(description.split()) >= 3 for _, _, description in rows))
+            self.assertTrue(all(len(line) <= 80 for line in help_text.splitlines()))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def run_cli(self, root: Path, *args: str) -> tuple[int, str]:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
