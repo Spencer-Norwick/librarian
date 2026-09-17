@@ -1,8 +1,14 @@
 # Mounting Librarian
 
-Mounting means attaching this repo to a user's local reading workflow.
+Mounting means attaching this CLI workspace to a user's local reading workflow.
 
 The goal is to configure local ignored state, not to change the public project shape. Keep the repo flat, private reading files in `library/`, and generated state in `_state/` or `_output/`.
+
+## Before Mounting
+
+Install with Python 3.11 or newer following the README. Run commands from the intended workspace directory; activation of a virtual environment makes the executable available but does not choose a workspace. For a new empty workspace, start with `librarian mount --check`, then use `librarian init` to create missing setup files. `init` writes immediately and preserves existing files. Keep ordinary modifications in preview mode until reviewed.
+
+Ingest provides identity metadata and local text, not completed weekly enrichment. A weekly pick needs reviewed identity, a useful summary and primer prompts, and `Next action: clean`. Without a model hook, supply those fields manually or try the synthetic local demo in `docs/examples.md`. Scanned/garbled PDFs need OCR or manual repair first.
 
 ## Agent Protocol
 
@@ -68,16 +74,17 @@ librarian mount --privacy assisted --model auto
 Write a custom model command:
 
 ```bash
-librarian mount --privacy assisted --model custom --model-command "claude enrich-json" --apply
+librarian mount --privacy assisted --model custom --model-command "python3 _state/model-enrich-local.py"
+librarian mount --privacy assisted --model custom --model-command "python3 _state/model-enrich-local.py" --apply
 ```
 
-The public repo intentionally does not ship separate adapters for Codex, Claude, OpenAI, Ollama, or other providers. A user's configured `model_command` is the provider-specific layer.
+Create and test the referenced hook first; the example path is not a bundled adapter. The public repo intentionally does not ship separate adapters for Codex, Claude, OpenAI, Ollama, or other providers. A user's configured `model_command` is the provider-specific layer.
 
 Automation should prefer `librarian daily` and `librarian weekly` instead of stitching together lower-level commands.
 
 See `docs/automation.md` for the scheduler setup protocol.
 
-OCR should prefer `librarian ocr` instead of ad hoc file replacement. The default command is `ocrmypdf --skip-text`, and local users can override it with `ocr_command` in `_state/config.toml` or `LIBRARIAN_OCR_COMMAND`.
+OCR should prefer `librarian ocr` instead of ad hoc file replacement. The default command is `ocrmypdf --skip-text`: it leaves pages with existing text alone and OCRs image-only pages. It cannot repair a bad existing text layer; review such PDFs and deliberately choose an appropriate OCR command. Install OCRmyPDF and its system dependencies separately. Local users can override it with `ocr_command` in `_state/config.toml` or `LIBRARIAN_OCR_COMMAND`.
 
 Reply handlers should prefer `librarian reply` instead of editing `index.md` directly:
 
@@ -132,8 +139,10 @@ Expected output shape:
 
 After the synthetic test passes, check `require_external_model_approval` before sending excerpts from real library files to any external model provider.
 
-- `true` or missing: an explicit `--enrich` approves that real-file enrichment batch; configured automatic enrichment is skipped.
+- `true` or missing: an explicit `--enrich` or `librarian enrich` approves that real-file enrichment batch; configured automatic enrichment is skipped.
 - `false`: configured automatic enrichment may send excerpts without a per-batch prompt, including from scheduled jobs; still use dry-run review before broad batches.
+
+Dry-run enrichment executes the hook and can transmit excerpts; `--apply` controls whether returned metadata is saved. Before choosing an external hook, review its provider, input limit, and privacy policy. For automatic enrichment, deliberately set both `use_model_assistance = true` and `require_external_model_approval = false` in ignored config after opting in; `mount --privacy automatic` alone does not override the approval flag.
 
 ## Codex Hook Sandbox Note
 
@@ -150,7 +159,7 @@ Do not work around this by moving `library/`, `_state/`, or `CODEX_HOME` outside
 
 ## Safety
 
-To change only weekly selection, preview `librarian mount --weekly-mode short --weekly-max-minutes 60`, then repeat with `--apply`. Omitted model and privacy flags preserve existing settings. Use `--weekly-mode all` to include books again, or `--weekly-max-minutes 0` to remove the short-mode time ceiling. No readings or sent state are changed by these config updates.
+To change only weekly selection, preview `librarian mount --weekly-mode short --weekly-max-minutes 0`, then repeat with `--apply`. Omitted model and privacy flags preserve existing settings. The example keeps only the type filter; choose a positive minute value for an additional time ceiling. Use `--weekly-mode all` to include books again. No readings or sent state are changed by these config updates.
 
 `mount` writes only `_state/config.toml`, and only with `--apply`.
 
