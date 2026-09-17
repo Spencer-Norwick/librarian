@@ -55,6 +55,8 @@ cd /path/to/reading-librarian
 
 For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then calls the idempotent weekly delivery path. The weekly command writes a delivery journal at `_state/weekly-delivery.json`, posts a macOS notification, opens the local reading file, sends the title, summary, first prompt, and compact library status through Messages, then marks the pick sent only after requested delivery steps succeed. If a delivery step fails, a later launchd run retries the incomplete step without duplicating completed steps. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
 
+Email retries use a stable weekly idempotency key and are automatic inside Resend's 24-hour retention window. For older email attempts and for notification, file-open, and Messages steps, an abrupt process interruption can make the outcome unknowable; the journal then stops instead of risking a duplicate. Review the delivery and clear `in_progress_step` in `_state/weekly-delivery.json` only when a retry is wanted.
+
 ## Preview Before Enabling
 
 ```bash
