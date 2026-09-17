@@ -1,6 +1,6 @@
 # Public alpha readiness plan
 
-Status: implementation and local validation complete; GitHub delivery is in progress. Routine completion includes a checked, merged pull request; independent human usability testing and a versioned release are separate steps.
+Status: implementation, local validation, and Linux/macOS CI validation complete. Delivery is recorded in [pull request #1](https://github.com/Spencer-Norwick/librarian/pull/1). Routine completion includes a checked, merged pull request; independent human usability testing and a versioned release are separate steps.
 
 ## Scope and safeguards
 
@@ -31,4 +31,4 @@ Consolidate the existing work and make a fresh installation usable. Keep the fla
 
 ## Final evidence
 
-124 tests and 19 subtests pass, including from a clean committed export. Both distribution archives pass member checks and the installed wheel completes the provider-free workflow after the build checkout is removed. The documented local-hook walkthrough also passes. Historical scanning found no secrets in 203 text blobs. Remote CI is required before merge. Live service integrations, independent human usability testing, and versioned release publication are not claimed; see `PROJECT_STATE.md` and `release.md`.
+124 tests and 19 subtests pass, including from a clean committed export. Both distribution archives pass member checks and the installed wheel completes the provider-free workflow after the build checkout is removed. The documented local-hook walkthrough also passes. Historical scanning found no secrets in 203 text blobs. All four CI jobs passed on Linux/macOS with Python 3.11/3.14, including installed-package checks. CI must also pass for the final PR revision before merge. Live service integrations, independent human usability testing, and versioned release publication are not claimed; see `PROJECT_STATE.md` and `release.md`.

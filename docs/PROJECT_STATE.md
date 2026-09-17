@@ -2,12 +2,12 @@
 
 Last updated: 2026-09-17
 Repository: reading-librarian
-Branch: codex/public-alpha-readiness
-Last known-good commit: cda6878 — Restore library consistency after repair failures and preserve uncertain delivery state.
+Branch: main (integration target)
+Last known-good commit: f7efd9f — Make command help and mount tests portable across CI environments.
 
 ## Current Objective
 
-Deliver the reviewed public alpha work through a pushed, checked, merged GitHub pull request: consolidate safety/metadata and weekly/help work, fix installed setup, document first-run usage, and verify failure recovery using synthetic libraries. See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
+Keep reviewed development backed up and integrated on GitHub main. Safety/metadata and weekly/help consolidation, installed setup, onboarding, and failure recovery are locally and CI validated. The public delivery record is [pull request #1](https://github.com/Spencer-Norwick/librarian/pull/1); see [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ## Verified State
 
@@ -21,6 +21,7 @@ Deliver the reviewed public alpha work through a pushed, checked, merged GitHub 
 
 ## Recent Progress
 
+- Made checked push/merge part of routine delivery in repository and shared instructions; fixed environment-dependent mount tests and older-Python help alignment.
 - Closed maintenance, source-removal, absent-state ingest, and OCR promotion recovery gaps with regressions.
 - Added onboarding, verified synthetic walkthrough, contribution/security guidance, unreleased notes, and a release checklist.
 - Built/inspected sdist and wheel; exercised installed commands after removing the build checkout.
@@ -36,12 +37,13 @@ Deliver the reviewed public alpha work through a pushed, checked, merged GitHub 
 | `docs/examples.md` workflow | passed | Synthetic ingest → local test-hook enrichment → maintain → short draft; no external delivery |
 | `detect-secrets scan --all-files --no-verify` on exported historical text blobs | passed | 203 historical text blobs; no findings. Automated scanning is not a guarantee |
 | Compilation and `git diff --check` | passed | No compilation or whitespace errors |
-| Remote CI and live provider/OCR/delivery integrations | not run | CI awaits publication; integrations synthetic/mocked during development |
+| Remote CI | passed | [Run 35271460793](https://github.com/Spencer-Norwick/librarian/actions/runs/35271460793): Linux/macOS, Python 3.11/3.14; suite and installed-package smoke checks passed |
+| Live provider/OCR/delivery integrations | not run | Synthetic/mocked during development |
 
 ## Active Problems
 
 - Independent human first-run testing remains before announcing a release.
-- Python 3.11/Linux are configured in CI but not locally validated; Windows is unverified.
+- Windows remains unverified. Live provider, OCR-tool, and delivery behavior has not been exercised against real endpoints.
 - Routine development must be pushed and merged after checks pass; local commits alone are not delivery. Version remains 0.1.0 until a separate alpha release is chosen.
 
 ## Decisions and Constraints
@@ -53,4 +55,4 @@ Deliver the reviewed public alpha work through a pushed, checked, merged GitHub 
 
 ## Next Action
 
-1. Push the review branch, merge its pull request after CI passes, and verify/synchronize GitHub and local `main`.
+1. Have an independent tester follow `docs/examples.md` from a fresh clone of GitHub main before announcing a versioned alpha release.
