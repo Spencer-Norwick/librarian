@@ -54,11 +54,11 @@ def move_without_overwrite(source: Path, target: Path) -> None:
             with dst:
                 shutil.copyfileobj(src, dst)
         shutil.copystat(source, target)
+        source.unlink()
     except Exception:
         if created_target and target.exists():
             target.unlink()
         raise
-    source.unlink()
 
 
 def write_text_without_overwrite(path: Path, text: str) -> None:

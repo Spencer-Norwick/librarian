@@ -13,6 +13,7 @@ import sys
 import tempfile
 import tomllib
 import urllib.parse
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,6 +196,8 @@ def read_optional_text(path: Path) -> str | None:
 def restore_optional_text(path: Path, content: str | None) -> None:
     if content is not None:
         write_text_atomic(path, content)
+    elif path.exists():
+        path.unlink()
 
 
 def ingest_log_line(original: str, entry: WorkEntry, target: Path) -> str:
@@ -919,11 +922,33 @@ def command_maintain(args: argparse.Namespace, root: Path) -> int:
         print("Dry run only. Re-run with --apply to rename files and rebuild index.md.")
         return 0
 
-    for rename in plan.renames:
-        move_without_overwrite(config.library / rename.source_name, config.library / rename.target_name)
-    write_index(config.index, plan.entries)
+    apply_maintenance_plan(config, plan)
     print(f"Applied maintenance: {len(plan.renames)} rename(s), {len(plan.entries)} indexed file(s).")
     return 0
+
+
+def apply_maintenance_plan(config: Config, plan: MaintenancePlan) -> None:
+    index_before = read_optional_text(config.index)
+    moved: list[RenamePlan] = []
+    try:
+        for rename in plan.renames:
+            move_without_overwrite(config.library / rename.source_name, config.library / rename.target_name)
+            moved.append(rename)
+        write_index(config.index, plan.entries)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for rename in reversed(moved):
+            try:
+                move_without_overwrite(config.library / rename.target_name, config.library / rename.source_name)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{rename.target_name}: {one_line(str(rollback_exc))}")
+        try:
+            restore_optional_text(config.index, index_before)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"Markdown state: {one_line(str(rollback_exc))}")
+        if rollback_errors:
+            raise RuntimeError(f"Maintenance failed and rollback was incomplete: {'; '.join(rollback_errors)}") from exc
+        raise
 
 
 def command_prepare_inbox(args: argparse.Namespace, root: Path) -> int:
@@ -1146,9 +1171,7 @@ def command_repair(args: argparse.Namespace, root: Path) -> int:
             )
         rename_sources = {rename.source_name for rename in metadata_plan.renames}
         rename_targets = {rename.target_name for rename in metadata_plan.renames}
-        for rename in metadata_plan.renames:
-            move_without_overwrite(config.library / rename.source_name, config.library / rename.target_name)
-        write_index(config.index, metadata_plan.entries)
+        apply_maintenance_plan(config, metadata_plan)
         print(f"Applied metadata repair: {len(metadata_plan.renames)} rename(s).")
         entries = read_index(config.index)
         selected_names = (selected_names - rename_sources) | rename_targets
@@ -1835,43 +1858,75 @@ def command_ocr(args: argparse.Namespace, root: Path) -> int:
 
     changed = 0
     entries_changed = False
-    for entry, source, target in plans:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        completed = subprocess.run(
-            config.ocr_command + [str(source), str(target)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            print(f"SKIP {entry.filename}: OCR command failed.")
-            if completed.stderr.strip():
-                print(completed.stderr.strip())
-            continue
-        changed += 1
-        print(f"Wrote {target.relative_to(root)}.")
-        if args.promote:
-            promoted = promote_ocr_copy(config, source, target)
-            print(f"Promoted OCR copy to {promoted.relative_to(root)} and preserved original.")
-            repaired = infer_entry(promoted, config, use_catalog_lookup=args.lookup, use_model_enrichment=args.enrich)
-            repaired.filename = promoted.name
-            preserve_existing_state(repaired, entry)
-            entries = upsert_entry(entries, repaired)
-            entries_changed = True
-    if entries_changed:
-        write_index(config.index, entries)
+    index_before = read_optional_text(config.index)
+    promotions: list[tuple[Path, Path, Path]] = []
+    try:
+        for entry, source, target in plans:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            completed = subprocess.run(
+                config.ocr_command + [str(source), str(target)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                print(f"SKIP {entry.filename}: OCR command failed.")
+                if completed.stderr.strip():
+                    print(completed.stderr.strip())
+                continue
+            changed += 1
+            print(f"Wrote {target.relative_to(root)}.")
+            if args.promote:
+                promoted = promote_ocr_copy(config, source, target, promotions)
+                print(f"Promoted OCR copy to {promoted.relative_to(root)} and preserved original.")
+                repaired = infer_entry(promoted, config, use_catalog_lookup=args.lookup, use_model_enrichment=args.enrich)
+                repaired.filename = promoted.name
+                preserve_existing_state(repaired, entry)
+                entries = upsert_entry(entries, repaired)
+                entries_changed = True
+        if entries_changed:
+            write_index(config.index, entries)
+    except Exception as exc:
+        rollback_errors = rollback_ocr_promotions(promotions)
+        try:
+            restore_optional_text(config.index, index_before)
+        except Exception as rollback_exc:
+            rollback_errors.append(f"Markdown state: {one_line(str(rollback_exc))}")
+        if rollback_errors:
+            raise RuntimeError(f"OCR promotion failed and rollback was incomplete: {'; '.join(rollback_errors)}") from exc
+        raise
     print(f"Applied OCR for {changed} entr{'y' if changed == 1 else 'ies'}.")
     return 0
 
 
-def promote_ocr_copy(config: Config, source: Path, ocr_copy: Path) -> Path:
+def promote_ocr_copy(config: Config, source: Path, ocr_copy: Path, promotions: list[tuple[Path, Path, Path]] | None = None) -> Path:
     original_dir = config.ocr_outputs / "original-library-files"
     original_dir.mkdir(parents=True, exist_ok=True)
     preserved = unique_path(original_dir / source.name)
     move_without_overwrite(source, preserved)
-    move_without_overwrite(ocr_copy, source)
+    try:
+        move_without_overwrite(ocr_copy, source)
+    except Exception as exc:
+        try:
+            move_without_overwrite(preserved, source)
+        except Exception as rollback_exc:
+            raise RuntimeError(f"OCR promotion failed and rollback was incomplete: {one_line(str(rollback_exc))}; original preserved at {preserved}") from exc
+        raise
+    if promotions is not None:
+        promotions.append((source, ocr_copy, preserved))
     return source
+
+
+def rollback_ocr_promotions(promotions: list[tuple[Path, Path, Path]]) -> list[str]:
+    errors: list[str] = []
+    for source, ocr_copy, preserved in reversed(promotions):
+        try:
+            move_without_overwrite(source, ocr_copy)
+            move_without_overwrite(preserved, source)
+        except Exception as exc:
+            errors.append(f"{source.name}: {one_line(str(exc))}; original preserved at {preserved}")
+    return errors
 
 
 def extract_text_for_enrichment(path: Path) -> tuple[str, list[str]]:
@@ -2031,6 +2086,7 @@ def start_weekly_delivery_state(config: Config, plan: DigestPlan, steps: list[st
         "requested_steps": steps,
         "completed_steps": [],
         "in_progress_step": "",
+        "email_idempotency_key": digest_email_idempotency_key(plan.entry),
         "created_at": now_stamp(),
         "completed_at": "",
         "last_error": "",
@@ -2056,9 +2112,23 @@ def mark_delivery_step(config: Config, state: dict[str, object], step: str) -> N
 
 
 def mark_delivery_error(config: Config, state: dict[str, object], error: Exception) -> None:
-    state["in_progress_step"] = ""
+    if not delivery_outcome_unknown(error):
+        state["in_progress_step"] = ""
     state["last_error"] = one_line(str(error))
     save_weekly_delivery_state(config, state)
+
+
+def delivery_outcome_unknown(error: Exception) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, subprocess.TimeoutExpired, subprocess.CalledProcessError)):
+            return True
+        if isinstance(current, urllib.error.URLError) and not isinstance(current, urllib.error.HTTPError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def run_delivery_steps(config: Config, plan: DigestPlan, root: Path, steps: list[str], state: dict[str, object]) -> None:
@@ -2078,7 +2148,13 @@ def run_delivery_steps(config: Config, plan: DigestPlan, root: Path, steps: list
         state["last_error"] = ""
         save_weekly_delivery_state(config, state)
         try:
-            run_delivery_step(config, plan, root, step)
+            if step == "email":
+                key = str(state.get("email_idempotency_key") or digest_email_idempotency_key(plan.entry, str(state.get("week") or current_week_id())))
+                state["email_idempotency_key"] = key
+                save_weekly_delivery_state(config, state)
+                run_delivery_step(config, plan, root, step, email_idempotency_key=key)
+            else:
+                run_delivery_step(config, plan, root, step)
         except Exception as exc:
             mark_delivery_error(config, state, exc)
             raise
@@ -2090,7 +2166,8 @@ def email_idempotency_window_open(state: dict[str, object]) -> bool:
         created = dt.datetime.fromisoformat(str(state.get("created_at") or ""))
     except ValueError:
         return False
-    return dt.datetime.now() - created < dt.timedelta(hours=23)
+    now = dt.datetime.now(created.tzinfo)
+    return dt.timedelta(0) <= now - created < dt.timedelta(hours=23)
 
 
 def delivery_step_label(step: str) -> str:
@@ -2103,9 +2180,9 @@ def delivery_step_label(step: str) -> str:
     return labels.get(step, step)
 
 
-def run_delivery_step(config: Config, plan: DigestPlan, root: Path, step: str) -> None:
+def run_delivery_step(config: Config, plan: DigestPlan, root: Path, step: str, email_idempotency_key: str | None = None) -> None:
     if step == "email":
-        send_digest_email(config, plan.entry, plan.body)
+        send_digest_email(config, plan.entry, plan.body, idempotency_key=email_idempotency_key)
         print("Sent digest email.")
     elif step == "notify_mac":
         send_mac_notification(plan.entry, plan.draft_path)
@@ -2407,7 +2484,7 @@ def require_message_config(config: Config) -> str:
     return recipient
 
 
-def send_digest_email(config: Config, entry: WorkEntry, body: str) -> None:
+def send_digest_email(config: Config, entry: WorkEntry, body: str, idempotency_key: str | None = None) -> None:
     api_key, sender, recipient = require_email_config(config)
     payload = json.dumps(
         {
@@ -2423,7 +2500,7 @@ def send_digest_email(config: Config, entry: WorkEntry, body: str) -> None:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "Idempotency-Key": digest_email_idempotency_key(entry),
+            "Idempotency-Key": idempotency_key or digest_email_idempotency_key(entry),
             "User-Agent": "reading-librarian/0.1 (+local CLI)",
         },
         method="POST",
@@ -2436,9 +2513,10 @@ def send_digest_email(config: Config, entry: WorkEntry, body: str) -> None:
         raise ValueError(f"Email delivery failed: {exc}") from exc
 
 
-def digest_email_idempotency_key(entry: WorkEntry) -> str:
-    identity = f"{current_week_id()}\0{entry.filename}".encode("utf-8")
-    return f"reading-librarian/{current_week_id()}/{hashlib.sha256(identity).hexdigest()[:24]}"
+def digest_email_idempotency_key(entry: WorkEntry, week: str | None = None) -> str:
+    week = week or current_week_id()
+    identity = f"{week}\0{entry.filename}".encode("utf-8")
+    return f"reading-librarian/{week}/{hashlib.sha256(identity).hexdigest()[:24]}"
 
 
 def require_email_config(config: Config | None = None) -> tuple[str, str, str]:
@@ -2805,6 +2883,9 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         if args.command == "skip":
             return command_mark(args, root, "skipped")
     except OSError as exc:
+        print(f"OPERATION_ERROR: {exc}")
+        return 2
+    except RuntimeError as exc:
         print(f"OPERATION_ERROR: {exc}")
         return 2
     except ValueError as exc:
