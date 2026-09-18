@@ -1,107 +1,91 @@
-# Automation Runbook
+# Automation and delivery
 
-Keep automation thin. Scheduled jobs should call the CLI and let the CLI handle dry-run defaults, no-overwrite writes, logs, and index updates.
+[← Back to the README](../README.md)
 
-Use absolute paths in scheduler files, but keep public examples portable. Replace `/path/to/reading-librarian` with the local checkout path.
+Start with a working manual flow and a [prepared weekly queue](usage.md#prepare-a-weekly-pick). Scheduling is optional. Setup commands do not install jobs for you.
 
-## Finder Quick Action
+## Preview, then schedule
 
-The optional Finder Quick Action can call:
+From your checkout, preview both operations:
+
+```bash
+.venv/bin/librarian daily
+.venv/bin/librarian weekly
+```
+
+`daily` prepares and ingests the inbox, then checks the index. It does not automatically create summaries and questions. `weekly` shows the next ready pick and its draft.
+
+For a scheduler, use absolute paths and set its working directory to the checkout:
+
+```bash
+cd /path/to/reading-librarian
+.venv/bin/librarian daily --apply
+.venv/bin/librarian weekly-due --apply
+```
+
+These commands write library state and a local weekly draft. They do not send email or Messages. `weekly-due` exits cleanly when this week's delivery is complete and can resume a known incomplete step. Pause jobs in your scheduler; remove `--apply` to return to previews.
+
+Add `--lookup` or `--enrich` only after choosing those external-service behaviors. Explicit `--enrich` invokes your configured hook even when per-batch approval is otherwise required. Use `--maintain` only for a deliberate library-wide repair pass.
+
+To prefer essays and articles, [save a short-reading filter](usage.md#prefer-shorter-readings). Scheduled picks and `reply new` honor it; an empty filtered queue stops.
+
+## macOS notifications and Messages
+
+Preview first, then choose only the channels you want:
+
+```bash
+librarian weekly-due --notify-mac --open
+librarian weekly-due --notify-mac --open --apply
+```
+
+`--notify-mac` posts a notification; `--open` opens the local reading file. Neither requires email. For Messages, first set `message_to` under `[behavior]` in ignored `_state/config.toml`, or set `LIBRARIAN_MESSAGE_TO` in the scheduler environment. Add `--message-self` to explicitly send the title, summary, first question, and library status to that recipient.
+
+[`local.reading-librarian.daily.plist`](local.reading-librarian.daily.plist) and [`local.reading-librarian.weekly.plist`](local.reading-librarian.weekly.plist) are optional launchd templates. Replace **every** `/path/to/reading-librarian` before installing. The weekly template also runs at load and every 30 minutes; `weekly-due` prevents a second completed delivery in the same week.
+
+**Review the bundled scripts before enabling them.** [`librarian-daily.sh`](../scripts/librarian-daily.sh) explicitly runs `daily --apply --lookup --enrich`. [`librarian-weekly-local.sh`](../scripts/librarian-weekly-local.sh) runs that same preflight, then requests notifications, file opening, and Messages. They are examples for a deliberately configured assisted workflow, not the local-only commands above. A failed daily preflight stops the weekly script.
+
+### Finder Quick Action
+
+A Quick Action can invoke [`add-to-inbox.sh`](../scripts/add-to-inbox.sh):
 
 ```sh
 /path/to/reading-librarian/scripts/add-to-inbox.sh "$@"
 ```
 
-The script moves selected `.pdf`, `.epub`, `.txt`, `.md`, and `.docx` files into `inbox/` without overwriting existing inbox files. Folders, symlinks, and unsupported files are skipped.
+This helper **moves selected files immediately**; it has no preview mode. It chooses a new name for an existing inbox filename and skips folders, symlinks, and unsupported types. You can always copy files into `inbox/` yourself instead.
 
-## Recommended Jobs
+## Email
 
-Daily ingest:
-
-```bash
-cd /path/to/reading-librarian
-.venv/bin/librarian daily --apply
-```
-
-Plain daily ingestion does not create weekly summaries or prompts. Prepare the queue through reviewed enrichment before enabling weekly writes. Add `--lookup --enrich` only after the user has chosen catalog lookup and model enrichment for unattended new-file operation. Use `--maintain` only for a deliberate full-library repair pass.
-
-Weekly digest:
+Email uses Resend. Configure `RESEND_API_KEY`, `LIBRARIAN_EMAIL_FROM`, and `LIBRARIAN_EMAIL_TO` privately, then explicitly preview:
 
 ```bash
-cd /path/to/reading-librarian
-.venv/bin/librarian weekly --apply
+librarian weekly --email
 ```
 
-This writes one weekly draft, marks the selected work sent, and appends `_state/sent-log.md`. It does not send email.
+Add `--apply` only to send. Never put credentials or recipients in a public scheduler file or issue.
 
-Weekly selection can be limited without changing the scheduler or removing books:
+## Record your response
 
 ```bash
-.venv/bin/librarian mount --weekly-mode short --weekly-max-minutes 0
-.venv/bin/librarian mount --weekly-mode short --weekly-max-minutes 0 --apply
+librarian reply read
+librarian reply skip
+librarian reply new
 ```
 
-Short mode permits essays, articles, stories, papers, chapters, and explicitly labeled excerpts. The example uses `0` for the type filter alone. Set a positive number if you also want an estimated time ceiling; omitting this setting retains the configured ceiling (60 on a new workspace). Weekly commands, replacement picks, and the status queue use this preference; `--mode all` overrides it for one invocation. If no eligible work remains, delivery stops rather than choosing a book. The full library remains available.
+Add `--apply` after reviewing the preview. `new` skips the latest pick and creates the next ready draft. `librarian resend-latest --apply` explicitly resends the previous selection to Messages; it does not choose a new filtered work.
 
-If an incomplete delivery's pick is excluded by a newly saved filter, its retry stops before sending anything further and preserves the delivery journal. Review that pending pick before explicitly widening the mode or ceiling to finish its delivery. `resend-latest` is an explicit resend of the previous selection, not a new filtered pick.
+## Recover an interrupted delivery
 
-macOS local delivery (requires a digest-ready queue and configured Messages recipient):
+Weekly delivery records progress in `_state/weekly-delivery.json`. Completed steps are not repeated. If a pending pick no longer matches your filter, the retry stops and preserves the journal; review it before deliberately widening the filter.
 
-```bash
-cd /path/to/reading-librarian
-.venv/bin/librarian daily --apply
-.venv/bin/librarian weekly-due --apply --notify-mac --open --message-self
-```
+An interrupted notification, file open, Messages send, or expired email retry may have an **unknown outcome**. The journal keeps `in_progress_step` and stops automatic retries. Read its `last_error` and check the actual destination before retrying.
 
-Notifications, file opening, Messages, Finder Quick Actions, and launchd are macOS integrations. Markdown-only weekly drafts do not require them.
+- If delivery occurred, do not clear the marker to send again.
+- If you confirm it did not occur, back up the journal, clear only `in_progress_step`, and rerun the matching command.
+- If you cannot determine the outcome, leave it intact and [ask for help](https://github.com/Spencer-Norwick/librarian/issues) with redacted details.
 
-For launchd, `scripts/librarian-weekly-local.sh` runs the daily pipeline first, then calls the idempotent weekly delivery path. The weekly command writes a delivery journal at `_state/weekly-delivery.json`, posts a macOS notification, opens the local reading file, sends the title, summary, first prompt, and compact library status through Messages, then marks the pick sent only after requested delivery steps succeed. If a delivery step fails, a later launchd run retries the incomplete step without duplicating completed steps. Configure the Messages recipient with `LIBRARIAN_MESSAGE_TO` in the scheduler environment or `message_to` in ignored `_state/config.toml`.
+Email retries reuse the original idempotency key. Uncertain email retries are allowed for less than 23 hours from journal creation; older attempts stop for review.
 
-Email retries retain the original weekly idempotency key. The CLI permits an uncertain email retry for less than 23 hours from journal creation, conservatively inside Resend's 24-hour retention window. For older email attempts and for notification, file-open, and Messages steps, an interruption, timeout, connection failure, or failed AppleScript process may leave the outcome unknown. The journal preserves `in_progress_step` and stops automatic retries. Check the actual channel and the journal's `last_error` first: if delivery occurred, do not clear the marker to resend. If you confirm it did not occur and deliberately want a retry, back up the journal, clear only `in_progress_step` in `_state/weekly-delivery.json`, then rerun the matching command. If the outcome cannot be determined, leave the marker intact and seek help with redacted details.
+## Setting this up with an agent
 
-## Preview Before Enabling
-
-```bash
-cd /path/to/reading-librarian
-.venv/bin/librarian daily
-.venv/bin/librarian weekly
-```
-
-Expected safe output:
-
-- `daily` reports OCR preparation, pending inbox moves, and lint status, or says no supported files were found.
-- `weekly` prints a notification preview and draft body without writing a draft or sent state.
-- `weekly-due` is for schedulers: it exits cleanly once the current week is complete and otherwise resumes incomplete delivery from `_state/weekly-delivery.json`.
-- The launchd weekly script intentionally runs daily first; if daily fails, weekly delivery stops instead of choosing from stale state.
-
-## Reply Commands
-
-Reply handlers should call the CLI instead of editing Markdown directly:
-
-```bash
-.venv/bin/librarian reply skip --apply
-.venv/bin/librarian reply read --apply
-.venv/bin/librarian reply new --apply
-```
-
-## Agent Setup Protocol
-
-When an agent sets up automation for a user:
-
-1. Run `.venv/bin/librarian mount --check`.
-2. Run `.venv/bin/librarian daily` and `.venv/bin/librarian weekly`.
-3. Ask before enabling write-state jobs.
-4. Create or update scheduler jobs for the chosen daily and weekly commands.
-5. Do not enable email delivery unless the user explicitly requests it.
-6. Keep provider-specific hooks, credentials, and scheduler state out of the public repo.
-
-## Changing Or Pausing
-
-- To pause ingestion, disable the daily job.
-- To pause weekly picks, disable the weekly job.
-- To switch from preview to live, add `--apply`.
-- To switch from live to preview, remove `--apply`.
-- To enable Messages delivery, configure `LIBRARIAN_MESSAGE_TO` or `message_to` in ignored `_state/config.toml`.
-- To enable email later, configure `RESEND_API_KEY`, `LIBRARIAN_EMAIL_FROM`, and `LIBRARIAN_EMAIL_TO`, then change the weekly command to `weekly --email --apply`.
-
-Run `.venv/bin/librarian lint` after changing scheduler behavior.
+Ask the agent to run `mount --check`, `daily`, and `weekly` as previews first. Approve scheduled writes, model calls, and delivery channels deliberately. Keep credentials and provider hooks in local state, and run `librarian lint` after changing the setup.

@@ -1,115 +1,92 @@
-# Mounting Librarian
+# Setup and optional models
 
-Mounting means attaching this CLI workspace to a user's local reading workflow.
+[← Back to the README](../README.md)
 
-The goal is to configure local ignored state, not to change the public project shape. Keep the repo flat, private reading files in `library/`, and generated state in `_state/` or `_output/`.
+The [quickstart](../README.md#get-started) gives you a local library with no account or model. This guide covers separate workspaces, settings, and optional enrichment.
 
-## Before Mounting
+## Choose your workspace
 
-Install with Python 3.11 or newer following the README. Run commands from the intended workspace directory; activation of a virtual environment makes the executable available but does not choose a workspace. For a new empty workspace, start with `librarian mount --check`, then use `librarian init` to create missing setup files. `init` writes immediately and preserves existing files. Keep ordinary modifications in preview mode until reviewed.
+The current directory is the workspace. Activating a virtual environment makes the command available; it does not select a library.
 
-Ingest provides identity metadata and local text, not completed weekly enrichment. A weekly pick needs reviewed identity, a useful summary and primer prompts, and `Next action: clean`. Without a model hook, supply those fields manually or try the synthetic local demo in `docs/examples.md`. Scanned/garbled PDFs need OCR or manual repair first.
-
-## Agent Protocol
-
-When an agent is asked to set up this project for a new user:
-
-1. Run `librarian mount --check`.
-2. Report the detected Python, PDF parser, model CLIs, recommended `model_command`, and digest command.
-3. Ask only for choices that cannot be inferred safely.
-4. Preview with `librarian mount ...` before writing config.
-5. Write config only with `librarian mount --apply ...`.
-6. Run `librarian lint` after mounting.
-
-Do not ingest files, enrich entries, create automations, or send email during mount unless the user explicitly asks for that separate action.
-
-If model enrichment is desired, set up a provider-specific local hook after mount. Keep that hook in ignored local state such as `_state/model-enrich-local`, not in the public repo.
-
-If scanned-PDF repair is desired, use `librarian ocr` after mount. It writes OCR copies under `_output/ocr/` and does not replace library files automatically.
-
-If automation is desired, follow `docs/automation.md` after mount.
-
-## User Choices
-
-Privacy mode:
-
-- `local`: no catalog lookup, no model enrichment, no email.
-- `assisted`: configure a model command if available, but only use it when the user runs `--enrich` or `librarian enrich`.
-- `automatic`: configure a model command and enable enrichment during ingest/reindex/maintain.
-
-Model mode:
-
-- `auto`: detect model CLIs and report them, but do not choose a provider-specific command.
-- `codex`: verify Codex CLI exists; still requires a JSON-compatible `--model-command`.
-- `custom`: use the command provided with `--model-command`.
-- `none`: disable model enrichment.
-
-Digest mode:
-
-- `none`: do not recommend a digest command.
-- `notify`: preview weekly digest notification with no writes.
-- `apply`: write weekly digest draft and sent state.
-- `email`: send weekly digest email only if environment variables are configured.
-
-## Examples
-
-Read-only inspection:
+To keep readings separate from the source checkout, install and activate the CLI first, then create a permanent folder:
 
 ```bash
+mkdir "$HOME/my-reading-library"
+cd "$HOME/my-reading-library"
 librarian mount --check
-```
-
-Preview a local-only config:
-
-```bash
+librarian init
 librarian mount --privacy local --model none
+librarian mount --privacy local --model none --apply
 ```
 
-Preview a detected-provider setup without selecting a model command:
+`init` creates missing setup files immediately and preserves existing ones. `mount` previews settings; only `mount --apply` saves `_state/config.toml`. Setup checks may create missing workspace directories, but do not ingest readings or send them anywhere.
+
+| Folder | Contents |
+| --- | --- |
+| `inbox/` | New reading files |
+| `library/` | Reading files and `index.md` |
+| `_state/` | Local settings, logs, optional model hooks |
+| `_output/` | Weekly drafts and OCR copies |
+| `_quarantine/` | Files set aside for manual review |
+
+Keep configured paths inside the workspace. They cannot be absolute or contain `..`. The checkout ignores reading files and state; a separately initialized workspace must also be kept out of public repositories. Git ignores are not encryption or backups.
+
+## Choose settings
+
+Preview with `librarian mount` and explicit options, then repeat with `--apply`. Omitted privacy and model options preserve existing settings.
+
+| Setting | Choices |
+| --- | --- |
+| `--privacy local` | Clear the model hook and disable automatic model assistance |
+| `--privacy assisted` | Use a configured model only when explicitly requested |
+| `--privacy automatic` | Configure automatic assistance; the approval setting below still applies |
+| `--model none` | Disable model enrichment |
+| `--model auto` | Detect available tools without choosing a provider command |
+| `--model codex` | Check for Codex; still needs a JSON-compatible hook |
+| `--model custom` | Use the command supplied with `--model-command` |
+| `--digest none\|notify\|apply\|email` | Choose the recommended digest command; does not install a schedule |
+
+For most setups, choose `local` without a model or `assisted` with a model you trust. A fresh workspace has catalog lookup off. Changing an existing workspace to `local` preserves its catalog setting: set `use_catalog_lookup = false` in `_state/config.toml` if you previously enabled it. Automatic enrichment and scheduled writes should be deliberate choices. Explicit command flags can request external services even when defaults are local; email always requires an explicit delivery command.
+
+## Optional model assistance
+
+A model can suggest summaries, tags, and reading questions. **Provider adapters are not bundled.** You need a small wrapper for your chosen provider or local model. Organizing files and adding notes by hand work without one.
+
+Keep the wrapper and credentials in ignored local state, for example `_state/model-enrich-local`. It must read JSON from stdin and print only enrichment JSON to stdout. Send only the needed metadata and text to the provider.
+
+Test it with synthetic input before using a real reading:
 
 ```bash
-librarian mount --privacy assisted --model auto
+printf '%s' '{"work":{"title":"Synthetic Test","author":"Example, Ada","year":"2026","work_type":"essay"},"text_excerpt":"This invented essay recommends choosing one reading and recording a thought afterward."}' \
+  | _state/model-enrich-local
 ```
 
-Write a custom model command:
+Expected output shape:
+
+```json
+{
+  "summary": "A concise, specific summary.",
+  "primer_prompts": ["A question about the argument.", "A question to consider while reading."],
+  "tags": ["reading"],
+  "related": "None."
+}
+```
+
+After creating and testing the hook, preview and save its configuration:
 
 ```bash
-librarian mount --privacy assisted --model custom --model-command "python3 _state/model-enrich-local.py"
-librarian mount --privacy assisted --model custom --model-command "python3 _state/model-enrich-local.py" --apply
+librarian mount --privacy assisted --model custom --model-command "_state/model-enrich-local"
+librarian mount --privacy assisted --model custom --model-command "_state/model-enrich-local" --apply
+librarian enrich "Title"
 ```
 
-Create and test the referenced hook first; the example path is not a bundled adapter. The public repo intentionally does not ship separate adapters for Codex, Claude, OpenAI, Ollama, or other providers. A user's configured `model_command` is the provider-specific layer.
+The path above is a hook **you create**, not an included file. Review the provider, excerpt limits, and proposed notes before using real files or saving with `--apply`.
 
-Automation should prefer `librarian daily` and `librarian weekly` instead of stitching together lower-level commands.
+### What leaves your machine
 
-See `docs/automation.md` for the scheduler setup protocol.
+The hook receives metadata and a text excerpt. It may send both to an external provider **even in a dry run**. `--apply` controls local saves, not model calls.
 
-OCR should prefer `librarian ocr` instead of ad hoc file replacement. The default command is `ocrmypdf --skip-text`: it leaves pages with existing text alone and OCRs image-only pages. It cannot repair a bad existing text layer; review such PDFs and deliberately choose an appropriate OCR command. Install OCRmyPDF and its system dependencies separately. Local users can override it with `ocr_command` in `_state/config.toml` or `LIBRARIAN_OCR_COMMAND`.
-
-Reply handlers should prefer `librarian reply` instead of editing `index.md` directly:
-
-- `librarian reply skip --apply` marks the latest sent digest skipped.
-- `librarian reply read --apply` marks the latest sent digest read.
-- `librarian reply new --apply` marks the latest sent digest skipped and writes the next digest-ready draft.
-
-## Local Model Hook Setup
-
-Agents should create a local hook only after the user chooses a provider or asks for model enrichment.
-
-The hook may be a shell script, Python script, local binary, or model CLI wrapper. It must:
-
-- read JSON from stdin
-- send only the needed metadata and text excerpt to the chosen model
-- print only valid enrichment JSON to stdout
-- keep provider credentials and implementation details out of the public repo
-
-Recommended local path:
-
-```text
-_state/model-enrich-local
-```
-
-Configure it with:
+Relevant settings in `_state/config.toml`:
 
 ```toml
 [behavior]
@@ -119,48 +96,22 @@ model_max_input_chars = 12000
 require_external_model_approval = true
 ```
 
-Before using real library files, test the hook with synthetic text:
+With approval `true` (or absent), an explicit `librarian enrich` or `--enrich` approves that batch; automatic enrichment is skipped. For unattended enrichment, deliberately set both `use_model_assistance = true` and `require_external_model_approval = false`. `mount --privacy automatic` alone does not turn off the approval requirement.
 
-```bash
-printf '%s' '{"work":{"title":"Synthetic Test","author":"Example, Ada","year":"2026","work_type":"essay"},"text_excerpt":"This synthetic essay says reading systems should reduce friction while preserving judgment and privacy."}' \
-  | _state/model-enrich-local
-```
+Agents must check this setting and obtain approval before sending real excerpts when approval is required. Start with a small preview even after opting into automatic processing.
 
-Expected output shape:
+## Troubleshooting
 
-```json
-{
-  "summary": "A concise, specific summary.",
-  "primer_prompts": ["A specific question.", "Another specific question."],
-  "tags": ["reading"],
-  "related": "None."
-}
-```
+| Problem | Try this |
+| --- | --- |
+| `librarian: command not found` | Return to the checkout and run `source .venv/bin/activate`, or use its `.venv/bin/librarian` path |
+| Python is too old | Check `python3 --version`; create the environment with Python 3.11 or newer |
+| PDF text is missing | Install `python -m pip install -e '.[pdf]'` from the checkout; image-only scans also need [OCR](usage.md#fix-an-entry) |
+| The library looks empty | Check your current directory; commands use that workspace |
+| No weekly pick is ready | Add reviewed notes or resolve the index's `Next action`; see [weekly preparation](usage.md#prepare-a-weekly-pick) |
+| A model command fails | Test the hook with synthetic JSON and confirm it prints only valid JSON |
+| A Codex hook cannot access state or network | Keep normal Codex auth outside the repo; ask the running agent to request sandbox access for the same dry run |
 
-After the synthetic test passes, check `require_external_model_approval` before sending excerpts from real library files to any external model provider.
+Do not relocate `CODEX_HOME` into the repository to work around sandbox errors. A nested Codex hook may need access to the normal `~/.codex` state and the network; review its dry-run result before applying enrichment.
 
-- `true` or missing: an explicit `--enrich` or `librarian enrich` approves that real-file enrichment batch; configured automatic enrichment is skipped.
-- `false`: configured automatic enrichment may send excerpts without a per-batch prompt, including from scheduled jobs; still use dry-run review before broad batches.
-
-Dry-run enrichment executes the hook and can transmit excerpts; `--apply` controls whether returned metadata is saved. Before choosing an external hook, review its provider, input limit, and privacy policy. For automatic enrichment, deliberately set both `use_model_assistance = true` and `require_external_model_approval = false` in ignored config after opting in; `mount --privacy automatic` alone does not override the approval flag.
-
-## Codex Hook Sandbox Note
-
-A Codex CLI hook is still provider-specific local state, even when the public repo stays provider-neutral. Codex auth and runtime state normally live under `CODEX_HOME`, usually `~/.codex`.
-
-When an agent runs inside a managed Codex sandbox, a nested `codex exec` command may fail before producing enrichment JSON because it cannot open Codex state, update its shell environment, or reach the model provider. The correct workflow is:
-
-1. Run `librarian enrich "Title"` without `--apply`.
-2. If the dry run reports Codex state, auth, or network sandbox errors, rerun that same dry-run command with explicit user approval for escalated execution.
-3. Review the proposed enrichment output.
-4. Only then run the matching `--apply` command, again with explicit approval if the same sandbox limitation applies.
-
-Do not work around this by moving `library/`, `_state/`, or `CODEX_HOME` outside the project rules. Do not set `CODEX_HOME` inside the repo unless the user intentionally wants to log in to a separate project-local Codex home.
-
-## Safety
-
-To change only weekly selection, preview `librarian mount --weekly-mode short --weekly-max-minutes 0`, then repeat with `--apply`. Omitted model and privacy flags preserve existing settings. The example keeps only the type filter; choose a positive minute value for an additional time ceiling. Use `--weekly-mode all` to include books again. No readings or sent state are changed by these config updates.
-
-`mount` writes only `_state/config.toml`, and only with `--apply`.
-
-Model enrichment can send title, author, filename, and text excerpts to the configured model provider. Keep `assisted` as the default unless the user deliberately chooses automatic enrichment.
+For safe automation setup, continue with [automation and delivery](automation.md). For code contributions, see [CONTRIBUTING](../CONTRIBUTING.md).
