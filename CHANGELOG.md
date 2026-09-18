@@ -2,6 +2,8 @@
 
 ## Unreleased — public alpha readiness
 
+- Simplify the first-run guide, add a provider-free sample walkthrough and real-output visuals, and separate everyday usage from optional model and delivery setup.
+
 - Integrate ingest rollback, external-model approval checks, interruption-aware weekly delivery, and index-field preservation.
 - Improve metadata repair, garbled-PDF detection, and explicit identity correction through `librarian edit`.
 - Add short-form weekly selection with an optional reading-time ceiling and readable command help.

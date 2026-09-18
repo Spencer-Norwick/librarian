@@ -1,8 +1,20 @@
 # Contributing
 
-Keep the project a small, inspectable CLI with flat files and one Markdown index. Read [AGENTS.md](AGENTS.md) for the safety and metadata rules before changing behavior.
+Thanks for helping make a small reading tool easier to trust and use. Bug reports, confusing first-run steps, and focused fixes are welcome.
 
-Use Python 3.11 or newer and an isolated environment:
+## Report a problem
+
+[Open an issue](https://github.com/Spencer-Norwick/librarian/issues) with:
+
+- Your OS and Python version.
+- The command you ran, what you expected, and what happened.
+- A small reproduction using the [sample essay](tests/fixtures/demo/ExampleAda_ReadingWithCare_2026_essay.txt) or other invented text.
+
+Remove private filenames, excerpts, paths, credentials, and delivery recipients from logs. Use [security reporting](SECURITY.md) for sensitive issues.
+
+## Work on the code
+
+Use Python 3.11 or newer. From a clone:
 
 ```bash
 python3 -m venv .venv
@@ -12,10 +24,10 @@ python -m pytest -q
 python scripts/check-installed-package.py
 ```
 
-Work on a focused branch and open a pull request describing the problem, resulting behavior, and validation. Include regression tests for data-loss risks, privacy boundaries, delivery retries, and index-format changes. Prefer deterministic local operations; add dependencies or model calls only when their value justifies the complexity.
+The package check builds and installs a wheel in a temporary environment, then exercises the CLI without the source checkout. CI runs on Linux and macOS with Python 3.11 and 3.14.
 
-For owner-authorized development, delivery includes pushing the reviewed branch and merging the pull request after checks pass. Verify the public default branch and synchronize the local checkout before reporting completion. A local-only commit does not provide the project's cloud backup or public work record; report any blocked push/merge explicitly. Contributors still use normal pull-request review and repository permissions. Versioned releases and package publication are separate from routine development integration.
+Keep changes focused. Read [AGENTS.md](AGENTS.md) for the safety and metadata rules, and open a pull request describing the problem, resulting behavior, and validation. Include regression coverage for data-loss risks, privacy boundaries, delivery retries, and index-format changes. Follow the [walkthrough](docs/examples.md) when changing the first-run experience.
 
-Use synthetic temporary workspaces for development. Do not commit real reading files, local config, provider hooks, credentials, generated digests, or personal delivery recipients. Do not run email or Messages delivery during tests. Run the [synthetic walkthrough](docs/examples.md) when changing the user workflow, and verify a built wheel when changing packaging.
+The design stays simple: plain files, one Markdown index, no database or wiki. Prefer deterministic local operations. Add dependencies or model calls only when they materially improve the result.
 
-For bug reports, include the command, Python/OS version, expected behavior, and a minimal synthetic reproduction. Redact filenames, text excerpts, hook output, paths, and config that contain private information. See [SECURITY.md](SECURITY.md) for sensitive reports.
+Use temporary synthetic workspaces. Never commit real readings, private settings, provider hooks, credentials, or generated personal drafts. Do not exercise real email or Messages delivery in tests. Demo screenshots must use invented content and show actual command output; label any hand-written reading notes.

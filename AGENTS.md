@@ -25,6 +25,8 @@ Project rules for this reading librarian:
 
 Development delivery:
 
+- Owner-only progress, planning, release checklists, and review records live in ignored `_state/private-docs/`. Read `_state/private-docs/PROJECT_STATE.md` when present; do not publish those records or real library state. Public docs are for users and contributors.
+
 - Completed owner-authorized development includes reviewed commits, pushing the task branch to the configured GitHub remote, and merging into the default branch after required checks pass. A local commit alone is not a completed delivery or cloud backup.
 - Use a pull request for the reviewed diff and validation record. Fetch current remote state before integration; preserve unrelated remote changes and branch protections.
 - Keep task branches backed up remotely at coherent checkpoints. Never force-push, rewrite shared history, or bypass failing checks to deliver faster.
